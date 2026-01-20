@@ -10,18 +10,18 @@ if(NOT EXISTS "/home/hoangdesamac/esp-idf/components/bootloader/subproject")
   file(MAKE_DIRECTORY "/home/hoangdesamac/esp-idf/components/bootloader/subproject")
 endif()
 file(MAKE_DIRECTORY
-  "/home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader"
-  "/home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader-prefix"
-  "/home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader-prefix/tmp"
-  "/home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader-prefix/src/bootloader-stamp"
-  "/home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader-prefix/src"
-  "/home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader-prefix/src/bootloader-stamp"
+  "/home/hoangdesamac/projects/DACS3/build/bootloader"
+  "/home/hoangdesamac/projects/DACS3/build/bootloader-prefix"
+  "/home/hoangdesamac/projects/DACS3/build/bootloader-prefix/tmp"
+  "/home/hoangdesamac/projects/DACS3/build/bootloader-prefix/src/bootloader-stamp"
+  "/home/hoangdesamac/projects/DACS3/build/bootloader-prefix/src"
+  "/home/hoangdesamac/projects/DACS3/build/bootloader-prefix/src/bootloader-stamp"
 )
 
 set(configSubDirs )
 foreach(subDir IN LISTS configSubDirs)
-    file(MAKE_DIRECTORY "/home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader-prefix/src/bootloader-stamp/${subDir}")
+    file(MAKE_DIRECTORY "/home/hoangdesamac/projects/DACS3/build/bootloader-prefix/src/bootloader-stamp/${subDir}")
 endforeach()
 if(cfgdir)
-  file(MAKE_DIRECTORY "/home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader-prefix/src/bootloader-stamp${cfgdir}") # cfgdir has leading slash
+  file(MAKE_DIRECTORY "/home/hoangdesamac/projects/DACS3/build/bootloader-prefix/src/bootloader-stamp${cfgdir}") # cfgdir has leading slash
 endif()

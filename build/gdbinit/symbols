@@ -18,8 +18,8 @@ end
 
 # Load bootloader symbols
 set confirm off
-    add-symbol-file /home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader/bootloader.elf
+    add-symbol-file /home/hoangdesamac/projects/DACS3/build/bootloader/bootloader.elf
 set confirm on
 
 # Load application symbols
-file /home/hoangdesamac/projects/esp32-learning-n16r8/build/esp32-learning-n16r8.elf
+file /home/hoangdesamac/projects/DACS3/build/esp32.elf

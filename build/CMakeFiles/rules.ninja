@@ -6,7 +6,7 @@
 # It is included in the main 'build.ninja'.
 
 # =============================================================================
-# Project: esp32-learning-n16r8
+# Project: esp32
 # Configurations: 
 # =============================================================================
 # =============================================================================
@@ -22,7 +22,7 @@ rule CUSTOM_COMMAND
 #############################################
 # Rule for compiling C files.
 
-rule C_COMPILER__esp32-learning-n16r8.2eelf_unscanned_
+rule C_COMPILER__esp32.2eelf_unscanned_
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/home/hoangdesamac/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32-elf-gcc $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -32,7 +32,7 @@ rule C_COMPILER__esp32-learning-n16r8.2eelf_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__esp32-learning-n16r8.2eelf_
+rule CXX_EXECUTABLE_LINKER__esp32.2eelf_
   command = $PRE_LINK && /home/hoangdesamac/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32-elf-g++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
   description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
@@ -2145,7 +2145,7 @@ rule C_STATIC_LIBRARY_LINKER____idf_memory_utils_
 # Rule for re-running cmake.
 
 rule RERUN_CMAKE
-  command = /usr/bin/cmake --regenerate-during-build -S/home/hoangdesamac/projects/esp32-learning-n16r8 -B/home/hoangdesamac/projects/esp32-learning-n16r8/build
+  command = /usr/bin/cmake --regenerate-during-build -S/home/hoangdesamac/projects/DACS3 -B/home/hoangdesamac/projects/DACS3/build
   description = Re-running CMake...
   generator = 1
 

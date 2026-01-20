@@ -1,2 +1,2 @@
-idf_component_register(SRCS "esp32-learning-n16r8.c"
+idf_component_register(SRCS "esp32.c"
                     INCLUDE_DIRS ".")
