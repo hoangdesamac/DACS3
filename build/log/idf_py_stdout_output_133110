@@ -1,0 +1,18 @@
+Command: ninja all
+[1/9] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/esp32-learning-n16r8.c.obj
+[2/9] Performing build step for 'bootloader'
+[1/1] cd /home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader && /home/hoangdesamac/.espressif/python_env/idf6.1_py3.13_env/bin/python /home/hoangdesamac/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /home/hoangdesamac/projects/esp32-learning-n16r8/build/bootloader/bootloader.bin
+Bootloader binary size 0x5320 bytes. 0x2ce0 bytes (35%) free.
+[3/9] No install step for 'bootloader'
+[4/9] Linking C static library esp-idf/main/libmain.a
+[5/9] Completed 'bootloader'
+[6/9] Generating esp-idf/esp_system/ld/sections.ld
+[7/9] Linking CXX executable esp32-learning-n16r8.elf
+[8/9] Generating binary image from built executable
+esptool v5.2.dev1
+Creating ESP32S3 image...
+Merged 2 ELF sections.
+Successfully created ESP32S3 image.
+Generated /home/hoangdesamac/projects/esp32-learning-n16r8/build/esp32-learning-n16r8.bin
+[9/9] cd /home/hoangdesamac/projects/esp32-learning-n16r8/build && /home/hoangdesamac/.espressif/python_env/idf6.1_py3.13_env/bin/python /home/hoangdesamac/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /home/hoangdesamac/projects/esp32-learning-n16r8/build/partition_table/partition-table.bin /home/hoangdesamac/projects/esp32-learning-n16r8/build/esp32-learning-n16r8.bin
+esp32-learning-n16r8.bin binary size 0x27b00 bytes. Smallest app partition is 0x100000 bytes. 0xd8500 bytes (84%) free.
