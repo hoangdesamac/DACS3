@@ -1,0 +1,1 @@
+Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/bin/python3 -DESP_PLATFORM=1 -DIDF_TARGET=esp32s3 -DCCACHE_ENABLE=0 /home/hoangdesamac/projects/DACS3
