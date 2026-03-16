@@ -22,6 +22,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "esp_system.h"
@@ -30,7 +31,7 @@
 #include "esp_event.h"
 #include "espnow.h"
 #include "oled_display.h"
-// #include "sensors.h"  // Commented out - no sensors yet
+#include "sensors.h"
 
 static const char *TAG = "MAIN";
 
@@ -176,22 +177,37 @@ static void initialize_wifi(void)
     ESP_LOGI(TAG, "Starting WiFi with SSID: %s", WIFI_SSID);
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // Wait for WiFi connection
+    // Wait for WiFi connection with watchdog resets
     ESP_LOGI(TAG, "Waiting for WiFi connection (timeout: 60 seconds)...");
-    EventBits_t bits = xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT,
-                                           pdFALSE, pdTRUE, pdMS_TO_TICKS(60000));
+    int timeout_ms = 60000;
+    int elapsed_ms = 0;
+    int log_count = 0;
 
-    if (bits & WIFI_CONNECTED_BIT)
+    while (elapsed_ms < timeout_ms)
     {
-        ESP_LOGI(TAG, "WiFi connection successful");
+        // Wait in 5-second chunks to allow watchdog resets
+        EventBits_t bits = xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT,
+                                               pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
+
+        if (bits & WIFI_CONNECTED_BIT)
+        {
+            ESP_LOGI(TAG, "WiFi connection successful");
+            return;
+        }
+
+        elapsed_ms += 5000;
+
+        // Log only every 30 seconds (every 6 iterations) to reduce monitor spam
+        if (++log_count % 6 == 0)
+        {
+            ESP_LOGI(TAG, "Still waiting for WiFi... (%d/%d ms)", elapsed_ms, timeout_ms);
+        }
     }
-    else
-    {
-        ESP_LOGW(TAG, "WiFi connection timeout after 60 seconds - stopping WiFi and using local time");
-        // Stop WiFi to prevent repeated reconnection attempts
-        esp_wifi_stop();
-        esp_wifi_deinit();
-    }
+
+    ESP_LOGW(TAG, "WiFi connection timeout after 60 seconds - stopping WiFi and using local time");
+    // Stop WiFi to prevent repeated reconnection attempts
+    esp_wifi_stop();
+    esp_wifi_deinit();
 }
 
 /**
@@ -229,7 +245,11 @@ static void wait_for_time_sync(void)
     // Check by seeing if year is reasonable (< 2016 means not synchronized)
     while (timeinfo.tm_year < (2016 - 1900) && ++retry < retry_count)
     {
-        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        // Only log on first and last attempt to reduce spam
+        if (retry == 1 || retry == retry_count - 1)
+        {
+            ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        }
         vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds, try again
         now = time(NULL);
         timeinfo = *localtime(&now);
@@ -247,19 +267,23 @@ static void wait_for_time_sync(void)
 }
 
 /**
- * Simple display task - shows time on OLED
+ * Display task - reads and displays sensor data on OLED
  *
  * This FreeRTOS task:
- *   1. Gets current time every second (Vietnam time, UTC+7)
- *   2. Displays time on OLED
- *   3. Also shows demo sensor values (zeros since no sensors)
+ *   1. Reads DHT22 temperature and humidity from GPIO 4
+ *   2. Reads light sensor status from LM393 comparator (GPIO 33)
+ *   3. Reads rain sensor status from LM393 comparator (GPIO 32)
+ *   4. Gets current time in Vietnam timezone (UTC+7)
+ *   5. Displays all sensor data on SSD1306 OLED display
  *
- * Runs at priority 5
+ * Runs continuously, updating display every 2 seconds
  * Automatically repeats forever
  */
 static void display_task(void *pvParameters)
 {
     // Task loop - runs forever until deleted
+    static int update_count = 0;
+
     while (1)
     {
         // Get current system time and convert to Vietnam timezone
@@ -278,20 +302,49 @@ static void display_task(void *pvParameters)
             snprintf(display_data.time_str, sizeof(display_data.time_str), "Syncing...");
         }
 
-        // Set dummy sensor values (for display testing)
-        display_data.temperature = 25.5f;  // Example: 25.5°C
-        display_data.humidity = 45.2f;     // Example: 45.2%
-        display_data.soil_moisture = 0.0f; // No sensor
-        display_data.light_level = 0.0f;   // No sensor
-        display_data.rain_detected = 0;    // No sensor
+        // ===== READ SENSOR VALUES =====
+        // Read DHT22 temperature and humidity
+        if (dht22_read(&display_data.temperature, &display_data.humidity) != 0)
+        {
+            // Failed to read DHT22, use dummy values
+            display_data.temperature = 0.0f;
+            display_data.humidity = 0.0f;
+        }
+
+        // Read LDR light level
+        if (adc_read_light(&display_data.light_level) != 0)
+        {
+            display_data.light_level = 0.0f;
+        }
+
+        // Read rain sensor
+        if (rain_read(&display_data.rain_detected) != 0)
+        {
+            display_data.rain_detected = 0;
+        }
+
+        // Read soil moisture
+        if (adc_read_soil(&display_data.soil_moisture) != 0)
+        {
+            display_data.soil_moisture = 0.0f;
+        }
 
         // Update OLED display
         oled_display_sensor_data(&display_data);
 
-        // Log to console
-        ESP_LOGI(TAG, "Time: %s (OLED Test - No Sensors)", display_data.time_str);
+        // Log sensor readings every update (every 5 minutes)
+        if (++update_count % 1 == 0)
+        {
+            ESP_LOGI(TAG, "SENSORS UPDATE - Time: %s | Temp: %.1f°C | Humidity: %.1f%% | Light: %.0f%% | Rain: %s | Soil: %.0f%%",
+                     display_data.time_str,
+                     display_data.temperature,
+                     display_data.humidity,
+                     display_data.light_level,
+                     display_data.rain_detected ? "WET" : "DRY",
+                     display_data.soil_moisture);
+        }
 
-        // Update display every 1 second
+        // Update display every 1 second to show live sensor updates
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -327,19 +380,23 @@ void app_main(void)
     // Initialize I2C bus and SSD1306 display
     // This must happen before sensor task to show status
     ESP_LOGI(TAG, "Initializing OLED display...");
+    vTaskDelay(pdMS_TO_TICKS(500)); // Give I2C time to stabilize
     if (oled_init() != 0)
     {
         ESP_LOGE(TAG, "OLED initialization FAILED - display will not work");
         // Continue anyway - other features might still work
     }
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     // ===== SENSOR INITIALIZATION =====
-    // SKIPPED - No sensors connected yet
-    // Uncomment below when you add sensors
-    // ESP_LOGI(TAG, "Initializing sensors...");
-    // if (sensors_init() != 0) {
-    //     ESP_LOGE(TAG, "Sensor initialization FAILED");
-    // }
+    // Initialize DHT22, LDR, and rain sensor
+    ESP_LOGI(TAG, "Initializing sensors...");
+    vTaskDelay(pdMS_TO_TICKS(500)); // Give GPIO/ADC time to initialize
+    if (sensors_init() != 0)
+    {
+        ESP_LOGE(TAG, "Sensor initialization FAILED");
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     // ===== TIMEZONE CONFIGURATION =====
     // Set timezone to Vietnam (ICT, UTC+7)
@@ -379,20 +436,20 @@ void app_main(void)
     xTaskCreate(
         display_task,   // Task function
         "display_task", // Task name (for debugging)
-        4096,           // Stack size in bytes
+        8192,           // Stack size in bytes (increased from 4096)
         NULL,           // Task input parameter
-        5,              // Priority (0-24, 5 is moderate)
+        4,              // Priority (0-24, lowered to 4)
         NULL            // Task handle (not needed)
     );
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    // ===== MAIN LOOP: SIMPLE HEARTBEAT =====
-    // Just a simple counter to show the app is running
-    ESP_LOGI(TAG, "OLED display started! Time counter running...");
+    // ===== MAIN LOOP: SILENT OPERATION =====
+    // Device runs silently, OLED updates every 5 minutes in background
+    ESP_LOGI(TAG, "Initialization complete. Device running silently...");
 
-    uint32_t uptime_seconds = 0;
     while (1)
     {
-        ESP_LOGI(TAG, "Device running! uptime: %lu seconds", uptime_seconds++);
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        // Just keep the watchdog alive and let display task handle everything
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Check every 1 second
     }
 }

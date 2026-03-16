@@ -14,6 +14,9 @@
 # EXTERNAL cache entries
 ########################
 
+//No help, variable specified on the command line.
+CCACHE_ENABLE:UNINITIALIZED=0
+
 //Path to a program.
 CMAKE_ADDR2LINE:FILEPATH=/home/hoangdesamac/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32-elf-addr2line
 
@@ -347,6 +350,9 @@ Mbed TLS_IS_TOP_LEVEL:STATIC=OFF
 Mbed TLS_SOURCE_DIR:STATIC=/home/hoangdesamac/.espressif/v5.5.3/esp-idf/components/mbedtls/mbedtls
 
 //No help, variable specified on the command line.
+PYTHON:UNINITIALIZED=/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/bin/python3
+
+//No help, variable specified on the command line.
 PYTHON_DEPS_CHECKED:UNINITIALIZED=1
 
 //No help, variable specified on the command line.
@@ -590,7 +596,7 @@ C_COMPILER_SUPPORTS_WFORMAT_SIGNEDNESS:INTERNAL=1
 //Details about finding Git
 FIND_PACKAGE_MESSAGE_DETAILS_Git:INTERNAL=[/usr/bin/git][v2.43.0()]
 //Details about finding Python3
-FIND_PACKAGE_MESSAGE_DETAILS_Python3:INTERNAL=[/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/bin/python][cfound components: Interpreter ][v3.12.3()]
+FIND_PACKAGE_MESSAGE_DETAILS_Python3:INTERNAL=[/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/bin/python3][cfound components: Interpreter ][v3.12.3()]
 //Details about finding Threads
 FIND_PACKAGE_MESSAGE_DETAILS_Threads:INTERNAL=[TRUE][v()]
 //ADVANCED property for variable: GIT_EXECUTABLE
@@ -601,10 +607,10 @@ _GNUInstallDirs_LAST_CMAKE_INSTALL_PREFIX:INTERNAL=/usr/local
 _Python3_Compiler_REASON_FAILURE:INTERNAL=
 //Development reason failure
 _Python3_Development_REASON_FAILURE:INTERNAL=
-_Python3_EXECUTABLE:INTERNAL=/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/bin/python
+_Python3_EXECUTABLE:INTERNAL=/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/bin/python3
 //Python3 Properties
 _Python3_INTERPRETER_PROPERTIES:INTERNAL=Python;3;12;3;32;64;;;abi3;/usr/lib/python3.12;/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/lib/python3.12;/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/lib/python3.12/site-packages;/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/lib/python3.12/site-packages
-_Python3_INTERPRETER_SIGNATURE:INTERNAL=9782e0760a6dc32172d5b24ded7f15bf
+_Python3_INTERPRETER_SIGNATURE:INTERNAL=241eb26aacfc196433a8d9aaa8ded272
 //NumPy reason failure
 _Python3_NumPy_REASON_FAILURE:INTERNAL=
 

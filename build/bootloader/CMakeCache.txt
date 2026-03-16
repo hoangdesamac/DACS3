@@ -254,7 +254,7 @@ IGNORE_EXTRA_COMPONENT:UNINITIALIZED=
 PROJECT_SOURCE_DIR:UNINITIALIZED=/home/hoangdesamac/projects/DACS3
 
 //No help, variable specified on the command line.
-PYTHON:UNINITIALIZED=/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/bin/python
+PYTHON:UNINITIALIZED=/home/hoangdesamac/.espressif/tools/python/v5.5.3/venv/bin/python3
 
 //No help, variable specified on the command line.
 PYTHON_DEPS_CHECKED:UNINITIALIZED=1

@@ -358,9 +358,9 @@ void oled_clear(void)
 /**
  * Display all sensor readings on OLED screen
  * Layout (optimized for 128x32):
- *   Line 1: Temperature (left) | Humidity (right)
- *   Line 2: Current Time
- * Note: Soil moisture, light, and rain not displayed (limited space)
+ *   Line 1: Temp (left) | Humidity (right)
+ *   Line 2: Light Level (left) | Rain (right)
+ *   Line 3: Current Time (centered)
  */
 void oled_display_sensor_data(const sensor_data_t *data)
 {
@@ -369,17 +369,27 @@ void oled_display_sensor_data(const sensor_data_t *data)
 
     char line[32];
 
-    // ===== LINE 1: Temperature (left side) =====
-    snprintf(line, sizeof(line), "T:%5.1f C", data->temperature);
+    // ===== LINE 1: DHT22 Sensor (Temperature & Humidity) =====
+    // Display: "DHT22: 25.3C 60.5%"
+    snprintf(line, sizeof(line), "Tmp&Hm: %5.1fC %4.1f%%", data->temperature, data->humidity);
     oled_draw_string(0, 0, line);
 
-    // ===== LINE 1: Humidity (right side) =====
-    snprintf(line, sizeof(line), "H:%5.1f%%", data->humidity);
-    oled_draw_string(64, 0, line);
+    // ===== LINE 2: Light Sensor =====
+    // Display: "Light: Bright" or "Light: Dark"
+    const char *light_status = data->light_level > 50.0f ? "Bright" : "Dark";
+    snprintf(line, sizeof(line), "Light: %s", light_status);
+    oled_draw_string(0, 8, line);
 
-    // ===== LINE 2: Current Time (HH:MM:SS) =====
-    // Centered roughly in the middle
-    oled_draw_string(20, 16, data->time_str);
+    // ===== LINE 3: Rain Sensor =====
+    // Display: "Rain: Dry" or "Rain: Wet"
+    const char *rain_status = data->rain_detected ? "Wet" : "Dry";
+    snprintf(line, sizeof(line), "Rain: %s", rain_status);
+    oled_draw_string(0, 16, line);
+
+    // ===== LINE 4: Current Time (centered) =====
+    // Display current time in HH:MM:SS format
+    snprintf(line, sizeof(line), "%s", data->time_str);
+    oled_draw_string(25, 24, line);
 
     // Send updated buffer to OLED display
     for (int page = 0; page < OLED_PAGES; page++)
