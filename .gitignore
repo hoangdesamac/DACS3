@@ -1,0 +1,18 @@
+# NodeJS
+node_modules/
+npm-debug.log
+
+# ESP-IDF
+build/
+sdkconfig.old
+
+# VSCode
+.vscode/
+
+# Cache
+.cache/
+.clangd
+
+# OS
+.DS_Store
+Thumbs.db
