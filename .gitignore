@@ -1,0 +1,21 @@
+# ESP-IDF / CMake build output
+build/
+
+# ESP-IDF generated local config
+sdkconfig
+sdkconfig.old
+
+# Python and cache artifacts
+__pycache__/
+*.pyc
+.cache/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*~
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
