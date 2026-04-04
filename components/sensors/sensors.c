@@ -239,6 +239,7 @@ int rain_read(int *detected)
  * Read all sensors and return combined data
  */
 void sensors_read(sensor_data_t *readings) 
+{
     memset(readings, 0, sizeof(sensor_data_t));
 
     // Read all sensors silently without logging to avoid monitor spam
