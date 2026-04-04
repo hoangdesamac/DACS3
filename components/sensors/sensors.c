@@ -2,16 +2,16 @@
  * Sensor Reading Module for Environmental Monitoring
  *
  * Supports:
- *   - DHT22: Analog Output via LM393 (GPIO36/ADC1_CH0)
- *   - Soil Moisture: Digital GPIO input LM393 DO (GPIO34)
+ *   - DHT11: Single-wire digital data (GPIO14)
  *   - Light Level (LDR): Digital GPIO input LM393 DO (GPIO33)
  *   - Rain Sensor: Digital GPIO input LM393 DO (GPIO32)
  */
 
 #include "sensors.h"
 #include "driver/gpio.h"
-#include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -19,13 +19,23 @@
 static const char *TAG = "SENSORS";
 
 /* ========== PIN CONFIGURATION ========== */
-#define DHT22_AO_ADC_CHANNEL ADC_CHANNEL_0  // DHT22 AO via LM393 (GPIO36)
-#define SOIL_MOISTURE_LM393_PIN GPIO_NUM_34 // Soil moisture DO
+#define DHT11_GPIO GPIO_NUM_14              // DHT11 data pin
 #define RAIN_SENSOR_LM393_PIN GPIO_NUM_32   // Rain sensor DO
 #define LIGHT_SENSOR_LM393_PIN GPIO_NUM_33  // Light sensor DO
 
-/* ========== ADC CONFIGURATION ========== */
-static adc_oneshot_unit_handle_t adc1_handle; // Handle to ADC1 controller
+/* ========== DHT11 TIMING (us) ========== */
+#define DHT11_START_SIGNAL_MS 20
+#define DHT11_RESPONSE_TIMEOUT_US 200
+#define DHT11_BIT_START_TIMEOUT_US 80
+#define DHT11_BIT_HIGH_TIMEOUT_US 120
+#define DHT11_BIT_HIGH_THRESHOLD_US 40
+
+static portMUX_TYPE dht11_spinlock = portMUX_INITIALIZER_UNLOCKED;
+
+// Store the last read time to prevent reading too frequently (DHT11 needs 2s)
+static int64_t last_dht11_read_time = 0;
+static float last_temperature = 0.0f;
+static float last_humidity = 0.0f;
 
 /**
  * Initialize all sensors
@@ -37,99 +47,158 @@ int sensors_init(void)
 {
     ESP_LOGI(TAG, "Initializing sensors...");
 
-    // ===== ADC INITIALIZATION FOR DHT22 AO =====
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-        .ulp_mode = ADC_ULP_MODE_DISABLE,
+    // ===== DHT11 DIGITAL INPUT =====
+    gpio_config_t dht11_conf = {
+        .pin_bit_mask = (1ULL << DHT11_GPIO),
+        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
     };
-
-    if (adc_oneshot_new_unit(&init_config, &adc1_handle) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Failed to initialize ADC");
-        return -1;
-    }
-
-    // ===== CONFIGURE DHT22 ADC CHANNEL =====
-    adc_oneshot_chan_cfg_t adc_config = {
-        .bitwidth = ADC_BITWIDTH_12,
-        .atten = ADC_ATTEN_DB_12,
-    };
-
-    adc_oneshot_config_channel(adc1_handle, DHT22_AO_ADC_CHANNEL, &adc_config);
-    ESP_LOGI(TAG, "DHT22 AO ADC configured on GPIO36 (ADC1_CH0)");
+    gpio_config(&dht11_conf);
+    gpio_set_level(DHT11_GPIO, 1); // Set idle high
+    ESP_LOGI(TAG, "DHT11 configured on GPIO14 (DATA, Open-Drain)");
 
     // ===== LM393 DIGITAL OUTPUT GPIO INPUTS =====
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << SOIL_MOISTURE_LM393_PIN) |
-                        (1ULL << RAIN_SENSOR_LM393_PIN) |
-                        (1ULL << LIGHT_SENSOR_LM393_PIN),
+        .pin_bit_mask =
+            (1ULL << RAIN_SENSOR_LM393_PIN) |
+            (1ULL << LIGHT_SENSOR_LM393_PIN),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
-    ESP_LOGI(TAG, "LM393 DO configured (GPIO32=Rain, GPIO33=Light, GPIO34=Soil)");
+    ESP_LOGI(TAG, "LM393 DO configured (GPIO32=Rain, GPIO33=Light)");
 
     ESP_LOGI(TAG, "Sensors initialized successfully");
     return 0;
 }
 
 /**
- * Read temperature and humidity from DHT22 via LM393 AO
+ * Wait until the DHT11 data line reaches the desired level
  *
- * Returns: 0 on success, -1 on failure
+ * Returns: 0 on success, -1 on timeout
  */
-int dht22_read(float *temp, float *humidity)
+static int dht11_wait_for_level(int level, int timeout_us)
 {
-    int adc_reading;
+    int64_t start = esp_timer_get_time();
 
-    // Read ADC value from GPIO36 (DHT22 AO output)
-    if (adc_oneshot_read(adc1_handle, DHT22_AO_ADC_CHANNEL, &adc_reading) != ESP_OK)
+    while (gpio_get_level(DHT11_GPIO) != level)
     {
-        ESP_LOGE(TAG, "ADC read DHT22 failed");
-        *temp = 0.0f;
-        *humidity = 0.0f;
-        return -1;
+        if ((esp_timer_get_time() - start) > timeout_us)
+        {
+            return -1;
+        }
     }
 
-    // Convert ADC (0-4095) to voltage (0-3.3V)
-    float voltage = (adc_reading / 4095.0f) * 3.3f;
+    return 0;
+}
 
-    // Map voltage to temperature and humidity
-    // Temperature: -40 + (voltage / 3.3) * 165 (range -40 to +125°C)
-    *temp = -40.0f + (voltage / 3.3f) * 165.0f;
+static int dht11_read_raw(uint8_t data[5])
+{
+    memset(data, 0, 5);
 
-    // Humidity: (voltage / 3.3) * 100 (range 0 to 100%)
-    *humidity = (voltage / 3.3f) * 100.0f;
+    if (dht11_wait_for_level(0, DHT11_RESPONSE_TIMEOUT_US) != 0)
+    {
+        return -1; // Timeout waiting for sensor LOW ACK
+    }
 
-    // Clamp to valid ranges
-    if (*temp < -40.0f)
-        *temp = -40.0f;
-    if (*temp > 125.0f)
-        *temp = 125.0f;
-    if (*humidity < 0.0f)
-        *humidity = 0.0f;
-    if (*humidity > 100.0f)
-        *humidity = 100.0f;
+    if (dht11_wait_for_level(1, DHT11_RESPONSE_TIMEOUT_US) != 0)
+    {
+        return -2; // Timeout waiting for sensor HIGH ACK
+    }
+
+    if (dht11_wait_for_level(0, DHT11_RESPONSE_TIMEOUT_US) != 0)
+    {
+        return -3; // Timeout waiting for end of ACK (sensor pulling LOW to start bit)
+    }
+
+    for (int i = 0; i < 40; i++)
+    {
+        if (dht11_wait_for_level(1, DHT11_BIT_START_TIMEOUT_US) != 0)
+        {
+            return -4; // Timeout waiting for bit start (HIGH)
+        }
+
+        int64_t start = esp_timer_get_time();
+        if (dht11_wait_for_level(0, DHT11_BIT_HIGH_TIMEOUT_US) != 0)
+        {
+            return -5; // Timeout waiting for bit finish (LOW)
+        }
+
+        int high_us = (int)(esp_timer_get_time() - start);
+        uint8_t bit = (high_us > DHT11_BIT_HIGH_THRESHOLD_US) ? 1 : 0;
+        data[i / 8] = (data[i / 8] << 1) | bit;
+    }
 
     return 0;
 }
 
 /**
- * Read soil moisture level using LM393 comparator output
- *
- * Returns soil moisture as binary: 0% (dry) or 100% (wet)
+ * Read temperature and humidity from DHT11 (single-wire digital)
  *
  * Returns: 0 on success, -1 on failure
  */
-int adc_read_soil(float *percentage)
+int dht11_read(float *temp, float *humidity)
 {
-    // Read digital comparator output from GPIO34
-    // HIGH (1) = dry, LOW (0) = wet
-    int soil_wet = gpio_get_level(SOIL_MOISTURE_LM393_PIN) == 0 ? 1 : 0;
+    if (temp == NULL || humidity == NULL)
+    {
+        return -1;
+    }
 
-    *percentage = soil_wet ? 100.0f : 0.0f;
+    int64_t current_time = esp_timer_get_time();
+    if (last_dht11_read_time > 0 && (current_time - last_dht11_read_time) < 2000000)
+    {
+        // DHT11 needs at least 2 seconds between reads
+        *temp = last_temperature;
+        *humidity = last_humidity;
+        return 0; // Return cached value
+    }
+
+    // Pull low to signal start
+    gpio_set_level(DHT11_GPIO, 0);
+    vTaskDelay(pdMS_TO_TICKS(DHT11_START_SIGNAL_MS));
+    
+    // Release the line to be pulled high by resistor, wait 30us
+    gpio_set_level(DHT11_GPIO, 1);
+    esp_rom_delay_us(30);
+
+    uint8_t data[5] = {0};
+    int result = 0;
+
+    portENTER_CRITICAL(&dht11_spinlock);
+    result = dht11_read_raw(data);
+    portEXIT_CRITICAL(&dht11_spinlock);
+
+    // Always update the read time so the sensor gets 2 seconds of rest even after a failure
+    last_dht11_read_time = esp_timer_get_time();
+
+    if (result != 0)
+    {
+        ESP_LOGW(TAG, "DHT11 read timeout (code: %d)", result);
+        *temp = last_temperature;
+        *humidity = last_humidity;
+        return -1;
+    }
+
+    uint8_t checksum = (uint8_t)(data[0] + data[1] + data[2] + data[3]);
+    if (checksum != data[4])
+    {
+        ESP_LOGW(TAG, "DHT11 checksum mismatch");
+        *temp = last_temperature;
+        *humidity = last_humidity;
+        return -1;
+    }
+
+    *humidity = (float)data[0] + ((float)data[1] * 0.1f);
+    *temp = (float)data[2] + ((float)data[3] * 0.1f);
+    
+    // Cache valid readings
+    last_temperature = *temp;
+    last_humidity = *humidity;
+    last_dht11_read_time = esp_timer_get_time();
 
     return 0;
 }
@@ -174,8 +243,7 @@ void sensors_read(sensor_readings_t *readings)
     memset(readings, 0, sizeof(sensor_readings_t));
 
     // Read all sensors silently without logging to avoid monitor spam
-    dht22_read(&readings->temperature, &readings->humidity);
-    adc_read_soil(&readings->soil_moisture);
+    dht11_read(&readings->temperature, &readings->humidity);
     adc_read_light(&readings->light_level);
     rain_read(&readings->rain_detected);
 }

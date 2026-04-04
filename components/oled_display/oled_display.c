@@ -369,8 +369,8 @@ void oled_display_sensor_data(const sensor_data_t *data)
 
     char line[32];
 
-    // ===== LINE 1: DHT22 Sensor (Temperature & Humidity) =====
-    // Display: "DHT22: 25.3C 60.5%"
+    // ===== LINE 1: DHT11 Sensor (Temperature & Humidity) =====
+    // Display: "Tmp&Hm: 25.3C 60.5%"
     snprintf(line, sizeof(line), "Tmp&Hm: %5.1fC %4.1f%%", data->temperature, data->humidity);
     oled_draw_string(0, 0, line);
 

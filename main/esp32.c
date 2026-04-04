@@ -270,7 +270,7 @@ static void wait_for_time_sync(void)
  * Display task - reads and displays sensor data on OLED
  *
  * This FreeRTOS task:
- *   1. Reads DHT22 temperature and humidity from GPIO 4
+ *   1. Reads DHT11 temperature and humidity from GPIO 14
  *   2. Reads light sensor status from LM393 comparator (GPIO 33)
  *   3. Reads rain sensor status from LM393 comparator (GPIO 32)
  *   4. Gets current time in Vietnam timezone (UTC+7)
@@ -303,10 +303,10 @@ static void display_task(void *pvParameters)
         }
 
         // ===== READ SENSOR VALUES =====
-        // Read DHT22 temperature and humidity
-        if (dht22_read(&display_data.temperature, &display_data.humidity) != 0)
+        // Read DHT11 temperature and humidity
+        if (dht11_read(&display_data.temperature, &display_data.humidity) != 0)
         {
-            // Failed to read DHT22, use dummy values
+            // Failed to read DHT11, use dummy values
             display_data.temperature = 0.0f;
             display_data.humidity = 0.0f;
         }
@@ -321,12 +321,6 @@ static void display_task(void *pvParameters)
         if (rain_read(&display_data.rain_detected) != 0)
         {
             display_data.rain_detected = 0;
-        }
-
-        // Read soil moisture
-        if (adc_read_soil(&display_data.soil_moisture) != 0)
-        {
-            display_data.soil_moisture = 0.0f;
         }
 
         // Update OLED display
@@ -389,7 +383,7 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(500));
 
     // ===== SENSOR INITIALIZATION =====
-    // Initialize DHT22, LDR, and rain sensor
+    // Initialize DHT11, LDR, and rain sensor
     ESP_LOGI(TAG, "Initializing sensors...");
     vTaskDelay(pdMS_TO_TICKS(500)); // Give GPIO/ADC time to initialize
     if (sensors_init() != 0)

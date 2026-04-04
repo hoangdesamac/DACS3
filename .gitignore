@@ -2,8 +2,12 @@
 build/
 
 # ESP-IDF generated local config
-sdkconfig
+# NHỚ: Việc bỏ qua sdkconfig sẽ tốt nếu bạn dùng file `sdkconfig.defaults`,
+# còn chưa rành thì hãy để lại sdkconfig nha!
+# sdkconfig
 sdkconfig.old
+dependencies.lock
+managed_components/
 
 # Python and cache artifacts
 __pycache__/
@@ -19,3 +23,9 @@ __pycache__/
 # OS/editor noise
 .DS_Store
 Thumbs.db
+
+# VS Code (team-friendly)
+.vscode/*
+!.vscode/settings.json
+!.vscode/c_cpp_properties.json
+!.vscode/extensions.json

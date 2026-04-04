@@ -11,14 +11,14 @@ GPIO21 (SDA)         ->    SDA
 GND                  ->    GND
 ```
 
-### DHT22 Temperature & Humidity Sensor
+### DHT11 Temperature & Humidity Sensor
 ```
-ESP32 Dev Kit Pin    ->    DHT22 Pin
-GPIO4                ->    Data (middle pin)
+ESP32 Dev Kit Pin    ->    DHT11 Pin
+GPIO14               ->    Data (middle pin)
 3.3V                 ->    VCC (+)
 GND                  ->    GND (-)
 ```
-Note: Add a 10kΩ pull-up resistor between GPIO4 and 3.3V
+Note: Add a 10kΩ pull-up resistor between GPIO14 and 3.3V
 
 ### Soil Moisture Sensor (Analog)
 ```
@@ -72,14 +72,14 @@ idf.py -p /dev/ttyUSB0 monitor
 ## Features
 
 ✅ OLED Display (128x64)
-  - Temperature & Humidity (DHT22)
+  - Temperature & Humidity (DHT11)
   - Soil Moisture Percentage
   - Light Level
   - Rain Detection
   - Current Time
 
 ✅ Sensor Readings
-  - DHT22: Temperature & Humidity
+  - DHT11: Temperature & Humidity
   - Analog ADC: Soil Moisture, Light Level
   - Digital GPIO: Rain Detection
 
@@ -117,7 +117,7 @@ If text appears in wrong positions, adjust Y-coordinates in:
 **No sensor readings:**
 - Check GPIO pin numbers in `.c` files
 - Verify ADC has power (3.3V)
-- Ensure DHT22 pull-up resistor is connected
+- Ensure DHT11 pull-up resistor is connected
 
 **ESP-NOW not sending:**
 - Check peer MAC address matches the other device

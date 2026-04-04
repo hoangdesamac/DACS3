@@ -7,13 +7,12 @@ typedef struct
 {
     float temperature;
     float humidity;
-    float soil_moisture;
     float light_level;
     int rain_detected;
 } sensor_readings_t;
 
 /**
- * Initialize sensors (DHT22, ADC for soil/light, GPIO for rain)
+ * Initialize sensors (DHT11, GPIO for light and rain)
  */
 int sensors_init(void);
 
@@ -23,14 +22,13 @@ int sensors_init(void);
 void sensors_read(sensor_readings_t *readings);
 
 /**
- * Read DHT22 temperature and humidity
+ * Read DHT11 temperature and humidity
  */
-int dht22_read(float *temp, float *humidity);
+int dht11_read(float *temp, float *humidity);
 
 /**
- * Read analog sensors via ADC
+ * Read light level via GPIO
  */
-int adc_read_soil(float *percentage);
 int adc_read_light(float *level);
 
 /**
