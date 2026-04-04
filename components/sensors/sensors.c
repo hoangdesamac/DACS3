@@ -238,14 +238,16 @@ int rain_read(int *detected)
 /**
  * Read all sensors and return combined data
  */
-void sensors_read(sensor_readings_t *readings)
-{
-    memset(readings, 0, sizeof(sensor_readings_t));
+void sensors_read(sensor_data_t *readings) 
+    memset(readings, 0, sizeof(sensor_data_t));
 
     // Read all sensors silently without logging to avoid monitor spam
     dht11_read(&readings->temperature, &readings->humidity);
     adc_read_light(&readings->light_level);
-    rain_read(&readings->rain_detected);
+    
+    int rain_tmp = 0;
+    rain_read(&rain_tmp);
+    readings->rain_detected = (uint8_t)rain_tmp;
     
     // Vituralization value
     readings->soil_moisture = 50.0f; 
