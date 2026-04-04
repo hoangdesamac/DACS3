@@ -2,16 +2,9 @@
 #define OLED_DISPLAY_H
 
 #include <stdint.h>
+#include "sensors.h" // Thêm dòng này để dùng chung struct sensor_data_t từ file sensors.h
 
-typedef struct
-{
-    float temperature;   // Temperature in °C
-    float humidity;      // Humidity in %
-    float soil_moisture; // Soil moisture % (not displayed on 128x32)
-    float light_level;   // Light level (not displayed on 128x32)
-    int rain_detected;   // Rain status (not displayed on 128x32)
-    char time_str[20];   // Time string HH:MM:SS AM/PM
-} sensor_data_t;
+// ĐÃ XÓA KHAI BÁO STRUCT Ở ĐÂY ĐỂ TRÁNH LỖI ĐỤNG ĐỘ (REDEFINITION)
 
 /**
  * Initialize SSD1306 OLED display over I2C
