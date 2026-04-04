@@ -317,24 +317,27 @@ static void display_task(void *pvParameters)
             display_data.light_level = 0.0f;
         }
 
-        // Read rain sensor
-        if (rain_read(&display_data.rain_detected) != 0)
+        // Read rain sensor (Sử dụng biến tạm int để tránh lỗi con trỏ do struct dùng uint8_t)
+        int temp_rain = 0;
+        if (rain_read(&temp_rain) != 0)
         {
             display_data.rain_detected = 0;
         }
+        else 
+        {
+            display_data.rain_detected = (uint8_t)temp_rain;
+        }
+        
+        // Gán giá trị ảo cho độ ẩm đất (do bạn đang đọc trực tiếp trong task thay vì gọi sensors_read)
+        display_data.soil_moisture = 50.0f;
 
         // Update OLED display
         oled_display_sensor_data(&display_data);
 
-        // Send sensor data to the receiver via ESP-NOW
-        // We pack the sensor data into a structured string for simplicity
-        char payload[100];
-        snprintf(payload, sizeof(payload), "T:%.1f,H:%.1f,L:%.0f,R:%d", 
-                 display_data.temperature,
-                 display_data.humidity,
-                 display_data.light_level,
-                 display_data.rain_detected);
-        espnow_send(peer_mac, (const uint8_t *)payload, strlen(payload));
+        // ===== GỬI DATA QUA ESP-NOW (ĐÃ SỬA) =====
+        // Gửi trực tiếp cấu trúc nhị phân thay vì dùng snprintf chuyển thành chuỗi (String)
+        // Điều này đảm bảo Gateway (nhận) có thể ép kiểu trực tiếp từ byte sang Struct một cách chính xác
+        espnow_send(peer_mac, (const uint8_t *)&display_data, sizeof(sensor_data_t));
 
         // Log sensor readings every update (every 5 minutes)
         if (++update_count % 1 == 0)
