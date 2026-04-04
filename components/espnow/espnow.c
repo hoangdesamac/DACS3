@@ -38,28 +38,13 @@ static void on_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int
 
 void espnow_init(void)
 {
-    // NVS (required by WiFi)
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
-
-    // Network interface & event loop
-    esp_netif_init();
-    esp_event_loop_create_default();
-
-    // WiFi in STA mode
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
-
+    // WiFi and NVS are already initialized by `initialize_wifi()` in main/esp32.c
+    // We only need to initialize ESP-NOW here.
+    
     // ESP-NOW
-    esp_now_init();
-    esp_now_register_send_cb(on_send_cb);
-    esp_now_register_recv_cb(on_recv_cb);
+    ESP_ERROR_CHECK(esp_now_init());
+    ESP_ERROR_CHECK(esp_now_register_send_cb(on_send_cb));
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(on_recv_cb));
 
     ESP_LOGI(TAG, "ESP-NOW initialized");
     espnow_print_mac();

@@ -48,7 +48,7 @@ static EventGroupHandle_t wifi_event_group;
 /* ========== CONFIGURATION ========== */
 // Target device MAC address for ESP-NOW communication
 // Change this to the MAC address of your receiving device
-static uint8_t peer_mac[] = {0xB0, 0xCB, 0xD8, 0x8A, 0x82, 0xA0};
+static uint8_t peer_mac[] = {0x3C, 0xDC, 0x75, 0x6E, 0x98, 0x2C};
 
 /* ========== SHARED DATA ========== */
 // Global sensor data structure for display
@@ -205,9 +205,9 @@ static void initialize_wifi(void)
     }
 
     ESP_LOGW(TAG, "WiFi connection timeout after 60 seconds - stopping WiFi and using local time");
-    // Stop WiFi to prevent repeated reconnection attempts
-    esp_wifi_stop();
-    esp_wifi_deinit();
+    // We should not stop WiFi here if we want to use ESP-NOW!
+    // esp_wifi_stop(); 
+    // esp_wifi_deinit();
 }
 
 /**
@@ -326,6 +326,16 @@ static void display_task(void *pvParameters)
         // Update OLED display
         oled_display_sensor_data(&display_data);
 
+        // Send sensor data to the receiver via ESP-NOW
+        // We pack the sensor data into a structured string for simplicity
+        char payload[100];
+        snprintf(payload, sizeof(payload), "T:%.1f,H:%.1f,L:%.0f,R:%d", 
+                 display_data.temperature,
+                 display_data.humidity,
+                 display_data.light_level,
+                 display_data.rain_detected);
+        espnow_send(peer_mac, (const uint8_t *)payload, strlen(payload));
+
         // Log sensor readings every update (every 5 minutes)
         if (++update_count % 1 == 0)
         {
@@ -416,12 +426,10 @@ void app_main(void)
     wait_for_time_sync();
 
     // ===== ESP-NOW WIRELESS PROTOCOL =====
-    // SKIPPED - Would need WiFi initialization first
-    // Uncomment below when you're ready to test ESP-NOW messages
-    // ESP_LOGI(TAG, "Initializing ESP-NOW protocol...");
-    // espnow_init();
-    // espnow_register_recv_cb(on_message);
-    // espnow_add_peer(peer_mac);
+    ESP_LOGI(TAG, "Initializing ESP-NOW protocol...");
+    espnow_init();
+    espnow_register_recv_cb(on_message);
+    espnow_add_peer(peer_mac);
 
     // ===== CREATE DISPLAY TASK =====
     // Creates a FreeRTOS task for displaying time
