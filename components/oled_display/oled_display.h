@@ -2,9 +2,7 @@
 #define OLED_DISPLAY_H
 
 #include <stdint.h>
-#include "sensors.h" // Thêm dòng này để dùng chung struct sensor_data_t từ file sensors.h
-
-// ĐÃ XÓA KHAI BÁO STRUCT Ở ĐÂY ĐỂ TRÁNH LỖI ĐỤNG ĐỘ (REDEFINITION)
+#include "sensors.h" 
 
 /**
  * Initialize SSD1306 OLED display over I2C
