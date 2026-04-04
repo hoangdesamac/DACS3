@@ -246,4 +246,7 @@ void sensors_read(sensor_readings_t *readings)
     dht11_read(&readings->temperature, &readings->humidity);
     adc_read_light(&readings->light_level);
     rain_read(&readings->rain_detected);
+    
+    // Vituralization value
+    readings->soil_moisture = 50.0f; 
 }
