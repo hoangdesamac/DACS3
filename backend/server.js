@@ -1,6 +1,12 @@
 const express = require('express');
 const mqtt = require('mqtt');
-const { Pool } = require('pg'); 
+const { Pool } = require('pg');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+
+// JWT config
+const JWT_SECRET = 'your-super-secret-key-change-in-production';
+const SALT_ROUNDS = 10; 
 
 const app = express();
 app.use(express.json());
@@ -41,17 +47,49 @@ const initDB = async () => {
             );
         `);
         console.log("✅ Đã khởi tạo cấu trúc Bảng (Schema) thành công!");
-        
+
         // Tạo sẵn 2 thiết bị mẫu vào DB nếu bảng đang trống (giống mock data cũ của bạn)
         await pool.query(`
-            INSERT INTO devices (id, name, type, is_online) 
-            VALUES 
+            INSERT INTO devices (id, name, type, is_online)
+            VALUES
                 ('device_001', 'Đèn phòng khách', 'LIGHT', false),
                 ('device_002', 'Máy bơm vườn', 'PUMP', true)
             ON CONFLICT (id) DO NOTHING;
         `);
     } catch (err) {
         console.error("❌ Lỗi khi khởi tạo DB:", err);
+    }
+};
+
+// =========================================================================
+// 🔐 AUTH MIDDLEWARE & HELPERS
+// =========================================================================
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) return res.status(401).json({ error: 'Token required' });
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: 'Invalid token' });
+        req.user = user;
+        next();
+    });
+};
+
+const initUsersTable = async () => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        console.log("✅ Đã khởi tạo bảng users thành công!");
+    } catch (err) {
+        console.error("❌ Lỗi khi khởi tạo bảng users:", err);
     }
 };
 
@@ -109,6 +147,79 @@ client.on('message', async (topic, message) => {
 // 📱 4. API CHO APP GỌI LÊN LẤY DỮ LIỆU
 // =========================================================================
 
+// =========================================================================
+// 🔐 4.1 AUTH ENDPOINTS
+// =========================================================================
+
+// POST /api/auth/register
+app.post('/api/auth/register', async (req, res) => {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password required' });
+    }
+    if (password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    try {
+        // Check existing user
+        const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+        if (existing.rows.length > 0) {
+            return res.status(400).json({ error: 'Email already exists' });
+        }
+
+        // Hash password
+        const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+
+        // Insert user
+        const result = await pool.query(
+            'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id',
+            [email, passwordHash]
+        );
+
+        res.status(201).json({ userId: result.rows[0].id, message: 'User created' });
+    } catch (err) {
+        console.error('Register error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// POST /api/auth/login
+app.post('/api/auth/login', async (req, res) => {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password required' });
+    }
+
+    try {
+        // Find user
+        const result = await pool.query('SELECT id, password_hash FROM users WHERE email = $1', [email]);
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        // Verify password
+        const valid = await bcrypt.compare(password, result.rows[0].password_hash);
+        if (!valid) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        // Generate JWT
+        const token = jwt.sign(
+            { userId: result.rows[0].id, email },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+
+        res.json({ token, userId: result.rows[0].id });
+    } catch (err) {
+        console.error('Login error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
 // Lấy danh sách thiết bị và trạng thái hiện tại
 app.get('/devices', async (req, res) => {
     try {
@@ -149,6 +260,7 @@ app.listen(PORT, async () => {
         const res = await pool.query('SELECT NOW()');
         console.log('✅ Đã kết nối thành công với PostgreSQL (Render) lúc:', res.rows[0].now);
         await initDB(); // Chạy hàm tạo bảng
+        await initUsersTable(); // Chạy hàm tạo bảng users
     } catch (err) {
         console.error('❌ Lỗi kết nối DB Render:', err.stack);
     }
