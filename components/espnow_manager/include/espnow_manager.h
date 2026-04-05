@@ -4,15 +4,16 @@
 #include <stdint.h>
 
 // ============================================================================
-// CẤU TRÚC DỮ LIỆU GIAO TIẾP
+// CẤU TRÚC DỮ LIỆU GIAO TIẾP (BẮT BUỘC PHẢI GIỐNG HỆT SENSOR.H BÊN NODE)
 // ============================================================================
 #pragma pack(push, 1)
 typedef struct {
-    float temperature;     // 4 bytes
-    float humidity;        // 4 bytes
-    float soil_moisture;   // 4 bytes
-    float light_level;     // 4 bytes
-    uint8_t rain_detected; // 1 byte
+    char time_str[16];     // Giữ nguyên để khớp byte với Node
+    float temperature;
+    float humidity;
+    float light_level;     // Đưa light_level lên trên để đúng thứ tự với Node
+    float soil_moisture;
+    uint8_t rain_detected;
 } sensor_data_t;
 #pragma pack(pop)
 
