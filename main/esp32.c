@@ -4,7 +4,7 @@
  * Environmental Sensor Monitoring System
  *
  * Features:
- *   - Reads multiple sensors (temperature, humidity, soil moisture, light, rain)
+ *   - Reads multiple sensors (temperature, humidity, light, rain)
  *   - Displays readings on SSD1306 OLED display in real-time
  *   - Sends sensor data via ESP-NOW wireless protocol
  *   - Syncs time via SNTP (NTP)
@@ -32,6 +32,7 @@
 #include "espnow.h"
 #include "oled_display.h"
 #include "sensors.h"
+#include "motor.h"
 
 static const char *TAG = "MAIN";
 
@@ -46,6 +47,9 @@ static EventGroupHandle_t wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 
 /* ========== CONFIGURATION ========== */
+#define SENSOR_LIVE_LOG_INTERVAL_SEC 2
+#define SENSOR_SUMMARY_LOG_INTERVAL_SEC 300
+
 // Target device MAC address for ESP-NOW communication
 // Change this to the MAC address of your receiving device
 static uint8_t peer_mac[] = {0x3C, 0xDC, 0x75, 0x6E, 0x98, 0x2C};
@@ -71,9 +75,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     {
         wifi_event_sta_disconnected_t *disconnected = (wifi_event_sta_disconnected_t *)event_data;
         ESP_LOGW(TAG, "WiFi disconnected! Reason: %d, reconnecting...", disconnected->reason);
-        // Add small delay before reconnect to avoid rapid reconnection attempts
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_wifi_connect();
+        esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
+        }
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
@@ -206,7 +212,7 @@ static void initialize_wifi(void)
 
     ESP_LOGW(TAG, "WiFi connection timeout after 60 seconds - stopping WiFi and using local time");
     // We should not stop WiFi here if we want to use ESP-NOW!
-    // esp_wifi_stop(); 
+    // esp_wifi_stop();
     // esp_wifi_deinit();
 }
 
@@ -304,7 +310,8 @@ static void display_task(void *pvParameters)
 
         // ===== READ SENSOR VALUES =====
         // Read DHT11 temperature and humidity
-        if (dht11_read(&display_data.temperature, &display_data.humidity) != 0)
+        int dht_status = dht11_read(&display_data.temperature, &display_data.humidity);
+        if (dht_status != 0)
         {
             // Failed to read DHT11, use dummy values
             display_data.temperature = 0.0f;
@@ -312,24 +319,23 @@ static void display_task(void *pvParameters)
         }
 
         // Read LDR light level
-        if (adc_read_light(&display_data.light_level) != 0)
+        int light_status = adc_read_light(&display_data.light_level);
+        if (light_status != 0)
         {
             display_data.light_level = 0.0f;
         }
 
         // Read rain sensor (Sử dụng biến tạm int để tránh lỗi con trỏ do struct dùng uint8_t)
         int temp_rain = 0;
-        if (rain_read(&temp_rain) != 0)
+        int rain_status = rain_read(&temp_rain);
+        if (rain_status != 0)
         {
             display_data.rain_detected = 0;
         }
-        else 
+        else
         {
             display_data.rain_detected = (uint8_t)temp_rain;
         }
-        
-        // Gán giá trị ảo cho độ ẩm đất (do bạn đang đọc trực tiếp trong task thay vì gọi sensors_read)
-        display_data.soil_moisture = 50.0f;
 
         // Update OLED display
         oled_display_sensor_data(&display_data);
@@ -339,20 +345,150 @@ static void display_task(void *pvParameters)
         // Điều này đảm bảo Gateway (nhận) có thể ép kiểu trực tiếp từ byte sang Struct một cách chính xác
         espnow_send(peer_mac, (const uint8_t *)&display_data, sizeof(sensor_data_t));
 
-        // Log sensor readings every update (every 5 minutes)
-        if (++update_count % 1 == 0)
+        int rain_raw = -1;
+        int light_raw = -1;
+        rain_read_raw(&rain_raw);
+        light_read_raw(&light_raw);
+
+        update_count++;
+
+        // Monitor-friendly full sensor line for easier tracking
+        if (update_count % SENSOR_LIVE_LOG_INTERVAL_SEC == 0)
         {
-            ESP_LOGI(TAG, "SENSORS UPDATE - Time: %s | Temp: %.1f°C | Humidity: %.1f%% | Light: %.0f%% | Rain: %s | Soil: %.0f%%",
+            ESP_LOGI(TAG, "SENSOR LIVE - %s | DHT:%s T=%.1fC H=%.1f%% | LDR:%s DO=%d => %s (%.0f%%) | RAIN:%s DO=%d => %s",
+                     display_data.time_str,
+                     (dht_status == 0) ? "OK" : "ERR",
+                     display_data.temperature,
+                     display_data.humidity,
+                     (light_status == 0) ? "OK" : "ERR",
+                     light_raw,
+                     (display_data.light_level >= 50.0f) ? "BRIGHT" : "DARK",
+                     display_data.light_level,
+                     (rain_status == 0) ? "OK" : "ERR",
+                     rain_raw,
+                     display_data.rain_detected ? "WET" : "DRY");
+        }
+
+        // Full sensor summary at a longer interval
+        if (update_count % SENSOR_SUMMARY_LOG_INTERVAL_SEC == 0)
+        {
+            ESP_LOGI(TAG, "SENSORS UPDATE - Time: %s | Temp: %.1f°C | Humidity: %.1f%% | Light: %.0f%% | Rain: %s",
                      display_data.time_str,
                      display_data.temperature,
                      display_data.humidity,
                      display_data.light_level,
-                     display_data.rain_detected ? "WET" : "DRY",
-                     display_data.soil_moisture);
+                     display_data.rain_detected ? "WET" : "DRY");
         }
 
         // Update display every 1 second to show live sensor updates
         vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/**
+ * Automatic Clothes Hanger Control Task with Limit Switches
+ *
+ * Logic:
+ *   - HANG OUT (FORWARD): Sunny (light > 50%) AND NO RAIN
+ *     * Runs motor forward until GPIO5 limit switch pressed (fully extended)
+ *
+ *   - PULL IN (REVERSE): Rainy OR Dark (light < 50%)
+ *     * Runs motor reverse until GPIO17 limit switch pressed (fully retracted)
+ *
+ *   - STOP: Limit switch reached, or conditions don't require change
+ *
+ * Safety features:
+ *   - Motor stops immediately when limit switch is pressed
+ *   - Hysteresis: Requires 2 consecutive stable readings before changing state
+ *   - Max runtime: 60 seconds failsafe timeout
+ */
+static void clothes_hanger_task(void *pvParameters)
+{
+    static motor_direction_t last_state = MOTOR_STOP;
+    static int stable_count = 0;
+    const int HYSTERESIS_COUNT = 2;
+
+    ESP_LOGI(TAG, "Starting automatic clothes hanger control task with limit switches...");
+
+    while (1)
+    {
+        // ===== READ SENSORS & LIMIT SWITCHES =====
+        float light_level = 0.0f;
+        int rain_detected = 0;
+        int limit_out_pressed = motor_read_limit_switch_out();
+        int limit_in_pressed = motor_read_limit_switch_in();
+
+        adc_read_light(&light_level);
+        rain_read(&rain_detected);
+
+        // ===== DETERMINE DESIRED STATE =====
+        motor_direction_t desired_state;
+
+        // Check if already at limit - keep current direction to avoid rapid cycling
+        if (limit_out_pressed && motor_get_direction() == MOTOR_FORWARD)
+        {
+            desired_state = MOTOR_STOP;
+        }
+        else if (limit_in_pressed && motor_get_direction() == MOTOR_REVERSE)
+        {
+            desired_state = MOTOR_STOP;
+        }
+        // light_level: 100% = bright (sunny), 0% = dark
+        else if (light_level > 50.0f && !rain_detected)
+        {
+            // Safe to hang clothes out (bright/sunny); and no rain
+            desired_state = MOTOR_FORWARD;
+        }
+        else
+        {
+            // Pull clothes in (rainy or dark)
+            desired_state = MOTOR_REVERSE;
+        }
+
+        // ===== ADDITIONAL SAFETY CHECK: Stop motor if limit reached =====
+        // This provides redundancy in case limit switch logic didn't catch it
+        if (motor_get_direction() == MOTOR_FORWARD && limit_out_pressed)
+        {
+            // Motor was going forward, limit OUT reached
+            motor_stop();
+            ESP_LOGI(TAG, "LIMIT SWITCH OUT PRESSED - Clothes fully extended, stopping motor");
+        }
+        else if (motor_get_direction() == MOTOR_REVERSE && limit_in_pressed)
+        {
+            // Motor was going reverse, limit IN reached
+            motor_stop();
+            ESP_LOGI(TAG, "LIMIT SWITCH IN PRESSED - Clothes fully retracted, stopping motor");
+        }
+
+        // ===== APPLY HYSTERESIS =====
+        if (desired_state == last_state)
+        {
+            stable_count++;
+        }
+        else
+        {
+            stable_count = 1;
+            last_state = desired_state;
+        }
+
+        // Execute motor control only after hysteresis threshold is reached
+        if (stable_count >= HYSTERESIS_COUNT && motor_get_direction() != desired_state)
+        {
+            motor_set_direction(desired_state);
+
+            ESP_LOGI(TAG, "CLOTHES HANGER - Light: %.0f%% | Rain: %s | Limit OUT: %s | Limit IN: %s | Action: %s",
+                     light_level,
+                     rain_detected ? "YES" : "NO",
+                     limit_out_pressed ? "PRESSED" : "open",
+                     limit_in_pressed ? "PRESSED" : "open",
+                     (desired_state == MOTOR_FORWARD) ? "HANG OUT" : (desired_state == MOTOR_REVERSE) ? "PULL IN"
+                                                                                                      : "STOP");
+
+            stable_count = 0;
+        }
+
+        // Check every 5 seconds
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 
@@ -363,10 +499,11 @@ static void display_task(void *pvParameters)
  *   1. NVS flash initialization (needed for WiFi/BLE)
  *   2. OLED display initialization
  *   3. Sensor initialization
- *   4. SNTP time synchronization
- *   5. ESP-NOW wireless protocol setup
- *   6. Create sensor reading task
- *   7. Main loop: Send periodic ESP-NOW messages
+ *   4. Motor and limit switch initialization
+ *   5. SNTP time synchronization
+ *   6. ESP-NOW wireless protocol setup
+ *   7. Create sensor reading task
+ *   8. Create clothes hanger control task
  *
  * Note: All initialization must complete before main loops start
  */
@@ -404,6 +541,16 @@ void app_main(void)
         ESP_LOGE(TAG, "Sensor initialization FAILED");
     }
     vTaskDelay(pdMS_TO_TICKS(1000));
+
+    // ===== MOTOR CONTROL INITIALIZATION =====
+    // Initialize motor control on GPIO18 (IN1), GPIO19 (IN2)
+    // Initialize limit switches on GPIO5 (OUT), GPIO17 (IN)
+    ESP_LOGI(TAG, "Initializing motor control with limit switches...");
+    if (motor_init() != 0)
+    {
+        ESP_LOGE(TAG, "Motor control initialization FAILED");
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     // ===== TIMEZONE CONFIGURATION =====
     // Set timezone to Vietnam (ICT, UTC+7)
@@ -445,6 +592,21 @@ void app_main(void)
         NULL,           // Task input parameter
         4,              // Priority (0-24, lowered to 4)
         NULL            // Task handle (not needed)
+    );
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // ===== CREATE CLOTHES HANGER CONTROL TASK =====
+    // Creates a FreeRTOS task for automatic clothes hanger control
+    // Monitors LDR (light), rain sensor, and limit switches to hang/pull in clothes
+    // Task checks conditions every 5 seconds and stops motor when limit reached
+    ESP_LOGI(TAG, "Creating automatic clothes hanger control task...");
+    xTaskCreate(
+        clothes_hanger_task, // Task function
+        "clothes_hanger",    // Task name (for debugging)
+        4096,                // Stack size in bytes
+        NULL,                // Task input parameter
+        3,                   // Priority (0-24, lower than display)
+        NULL                 // Task handle (not needed)
     );
     vTaskDelay(pdMS_TO_TICKS(500));
 

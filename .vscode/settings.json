@@ -1,0 +1,6 @@
+{
+    "idf.currentSetup": "/home/hoangdesamac/.espressif/v5.5.3/esp-idf",
+    "idf.port": "/dev/ttyUSB0",
+    "idf.flashType": "UART",
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+}

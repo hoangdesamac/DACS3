@@ -19,9 +19,18 @@
 static const char *TAG = "SENSORS";
 
 /* ========== PIN CONFIGURATION ========== */
-#define DHT11_GPIO GPIO_NUM_14              // DHT11 data pin
-#define RAIN_SENSOR_LM393_PIN GPIO_NUM_32   // Rain sensor DO
-#define LIGHT_SENSOR_LM393_PIN GPIO_NUM_33  // Light sensor DO
+#define DHT11_GPIO GPIO_NUM_14             // DHT11 data pin
+#define RAIN_SENSOR_LM393_PIN GPIO_NUM_32  // Rain sensor DO
+#define LIGHT_SENSOR_LM393_PIN GPIO_NUM_33 // Light sensor DO
+
+/*
+ * LM393 digital output polarity.
+ * Calibrated for current hardware:
+ *   - GPIO level 0 means rain detected
+ *   - GPIO level 0 means bright
+ */
+#define RAIN_DETECTED_GPIO_LEVEL 0
+#define LIGHT_BRIGHT_GPIO_LEVEL 0
 
 /* ========== DHT11 TIMING (us) ========== */
 #define DHT11_START_SIGNAL_MS 20
@@ -65,12 +74,14 @@ int sensors_init(void)
             (1ULL << RAIN_SENSOR_LM393_PIN) |
             (1ULL << LIGHT_SENSOR_LM393_PIN),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
-    ESP_LOGI(TAG, "LM393 DO configured (GPIO32=Rain, GPIO33=Light)");
+    ESP_LOGI(TAG, "LM393 DO configured (GPIO32=Rain, GPIO33=Light, pull-up ON)");
+    ESP_LOGI(TAG, "LM393 polarity: rain_detected_level=%d, light_bright_level=%d",
+             RAIN_DETECTED_GPIO_LEVEL, LIGHT_BRIGHT_GPIO_LEVEL);
 
     ESP_LOGI(TAG, "Sensors initialized successfully");
     return 0;
@@ -160,7 +171,7 @@ int dht11_read(float *temp, float *humidity)
     // Pull low to signal start
     gpio_set_level(DHT11_GPIO, 0);
     vTaskDelay(pdMS_TO_TICKS(DHT11_START_SIGNAL_MS));
-    
+
     // Release the line to be pulled high by resistor, wait 30us
     gpio_set_level(DHT11_GPIO, 1);
     esp_rom_delay_us(30);
@@ -194,7 +205,7 @@ int dht11_read(float *temp, float *humidity)
 
     *humidity = (float)data[0] + ((float)data[1] * 0.1f);
     *temp = (float)data[2] + ((float)data[3] * 0.1f);
-    
+
     // Cache valid readings
     last_temperature = *temp;
     last_humidity = *humidity;
@@ -206,18 +217,22 @@ int dht11_read(float *temp, float *humidity)
 /**
  * Read light level from LDR using LM393 comparator output
  *
- * Returns light as binary: 0% (dark) or 100% (bright)
+ * Returns brightness as binary: 100% = bright (sunny), 0% = dark
  *
  * Returns: 0 on success, -1 on failure
  */
 int adc_read_light(float *level)
 {
-    // Read digital comparator output from GPIO33
-    // HIGH (1) = dark, LOW (0) = bright (INVERTED)
-    int light_detected = gpio_get_level(LIGHT_SENSOR_LM393_PIN);
+    if (level == NULL)
+    {
+        return -1;
+    }
 
-    // Invert: HIGH = dark (0%), LOW = bright (100%)
-    *level = light_detected ? 0.0f : 100.0f;
+    int light_raw = 0;
+    light_read_raw(&light_raw);
+
+    // Return brightness level for downstream logic: 100% = bright, 0% = dark
+    *level = (light_raw == LIGHT_BRIGHT_GPIO_LEVEL) ? 100.0f : 0.0f;
 
     return 0;
 }
@@ -229,27 +244,51 @@ int adc_read_light(float *level)
  */
 int rain_read(int *detected)
 {
-    // Read digital comparator output from GPIO32
-    // LOW (0) = rain detected, HIGH (1) = dry
-    *detected = gpio_get_level(RAIN_SENSOR_LM393_PIN) == 0 ? 1 : 0;
+    if (detected == NULL)
+    {
+        return -1;
+    }
+
+    int rain_raw = 0;
+    rain_read_raw(&rain_raw);
+    *detected = (rain_raw == RAIN_DETECTED_GPIO_LEVEL) ? 1 : 0;
+    return 0;
+}
+
+int light_read_raw(int *raw_level)
+{
+    if (raw_level == NULL)
+    {
+        return -1;
+    }
+
+    *raw_level = gpio_get_level(LIGHT_SENSOR_LM393_PIN);
+    return 0;
+}
+
+int rain_read_raw(int *raw_level)
+{
+    if (raw_level == NULL)
+    {
+        return -1;
+    }
+
+    *raw_level = gpio_get_level(RAIN_SENSOR_LM393_PIN);
     return 0;
 }
 
 /**
  * Read all sensors and return combined data
  */
-void sensors_read(sensor_data_t *readings) 
+void sensors_read(sensor_data_t *readings)
 {
     memset(readings, 0, sizeof(sensor_data_t));
 
     // Read all sensors silently without logging to avoid monitor spam
     dht11_read(&readings->temperature, &readings->humidity);
     adc_read_light(&readings->light_level);
-    
+
     int rain_tmp = 0;
     rain_read(&rain_tmp);
     readings->rain_detected = (uint8_t)rain_tmp;
-    
-    // Vituralization value
-    readings->soil_moisture = 50.0f; 
 }

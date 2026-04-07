@@ -10,8 +10,6 @@ static const char *TAG = "ESPNOW";
 
 static espnow_recv_cb_t s_user_recv_cb = NULL;
 
-/* ---- internal callbacks ---- */
-
 static void on_send_cb(const esp_now_send_info_t *info, esp_now_send_status_t status)
 {
     const uint8_t *mac_addr = info->des_addr;
@@ -34,14 +32,9 @@ static void on_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int
     }
 }
 
-/* ---- public API ---- */
-
 void espnow_init(void)
 {
-    // WiFi and NVS are already initialized by `initialize_wifi()` in main/esp32.c
-    // We only need to initialize ESP-NOW here.
-    
-    // ESP-NOW
+
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_send_cb(on_send_cb));
     ESP_ERROR_CHECK(esp_now_register_recv_cb(on_recv_cb));
@@ -56,16 +49,36 @@ void espnow_add_peer(const uint8_t *peer_mac)
     memcpy(peer.peer_addr, peer_mac, 6);
     peer.channel = 0;
     peer.encrypt = false;
-    esp_now_add_peer(&peer);
 
-    ESP_LOGI(TAG, "Added peer %02X:%02X:%02X:%02X:%02X:%02X",
-             peer_mac[0], peer_mac[1], peer_mac[2],
-             peer_mac[3], peer_mac[4], peer_mac[5]);
+    esp_err_t err = esp_now_add_peer(&peer);
+    if (err == ESP_OK)
+    {
+        ESP_LOGI(TAG, "Added peer %02X:%02X:%02X:%02X:%02X:%02X",
+                 peer_mac[0], peer_mac[1], peer_mac[2],
+                 peer_mac[3], peer_mac[4], peer_mac[5]);
+    }
+    else if (err == ESP_ERR_ESPNOW_EXIST)
+    {
+        ESP_LOGW(TAG, "Peer already exists: %02X:%02X:%02X:%02X:%02X:%02X",
+                 peer_mac[0], peer_mac[1], peer_mac[2],
+                 peer_mac[3], peer_mac[4], peer_mac[5]);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to add peer (%s): %02X:%02X:%02X:%02X:%02X:%02X",
+                 esp_err_to_name(err),
+                 peer_mac[0], peer_mac[1], peer_mac[2],
+                 peer_mac[3], peer_mac[4], peer_mac[5]);
+    }
 }
 
 void espnow_send(const uint8_t *peer_mac, const uint8_t *data, uint16_t len)
 {
-    esp_now_send(peer_mac, data, len);
+    esp_err_t err = esp_now_send(peer_mac, data, len);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "esp_now_send failed (%s), len=%u", esp_err_to_name(err), len);
+    }
 }
 
 void espnow_register_recv_cb(espnow_recv_cb_t cb)

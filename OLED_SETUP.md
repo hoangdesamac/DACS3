@@ -20,32 +20,24 @@ GND                  ->    GND (-)
 ```
 Note: Add a 10kΩ pull-up resistor between GPIO14 and 3.3V
 
-### Soil Moisture Sensor (Analog)
+### Light Sensor (Digital LM393)
 ```
 ESP32 Dev Kit Pin    ->    Sensor Pin
-GPIO36 (ADC1_CH0)    ->    AO (Analog Output)
-A0                   ->    Digital Output (optional)
+GPIO33               ->    Digital Output (DO)
 3.3V                 ->    VCC
 GND                  ->    GND
 ```
-
-### Light Level Sensor (LDR with voltage divider)
-```
-ESP32 Dev Kit Pin    ->    Sensor Pin
-GPIO39 (ADC1_CH3)    ->    Voltage divider output
-3.3V                 ->    VCC
-GND                  ->    GND
-```
-Voltage divider: 10kΩ resistor in series with LDR to GND
+Logic in code: DO LOW = Bright (100%), DO HIGH = Dark (0%)
 
 ### Rain Sensor (Digital)
 ```
 ESP32 Dev Kit Pin    ->    Sensor Pin
-GPIO5                ->    Digital Output (pin 4)
+GPIO32               ->    Digital Output (DO)
 3.3V                 ->    VCC
 GND                  ->    GND
 ```
-Pull-up enabled in code
+Logic in code: DO LOW = Wet, DO HIGH = Dry (active LOW)
+Note: GPIO5 is used by the motor limit switch in this project.
 
 ## OLED I2C Address
 
@@ -73,31 +65,27 @@ idf.py -p /dev/ttyUSB0 monitor
 
 ✅ OLED Display (128x64)
   - Temperature & Humidity (DHT11)
-  - Soil Moisture Percentage
   - Light Level
   - Rain Detection
   - Current Time
 
 ✅ Sensor Readings
   - DHT11: Temperature & Humidity
-  - Analog ADC: Soil Moisture, Light Level
-  - Digital GPIO: Rain Detection
+  - Digital GPIO: Light Level, Rain Detection
 
 ✅ ESP-NOW Communication
   - Sends sensor data to peer device periodically
 
 ## Calibration
 
-### Soil Moisture Sensor
-Edit values in `components/sensors/sensors.c` (lines ~120):
-```c
-int dry_value = 4095;   // Adjust based on your dry reading
-int wet_value = 1500;   // Adjust based on your wet reading
-```
+### Light / Rain Sensor Threshold
+For LM393 modules, adjust the onboard potentiometer to tune switching threshold.
 
-1. Put sensor in dry soil → note the ADC value
-2. Put sensor in water → note the ADC value
-3. Update these constants
+1. Observe monitor logs for `DO` raw values.
+2. Set target behavior:
+  - Light: DO LOW when bright.
+  - Rain: DO LOW when wet.
+3. Turn potentiometer until raw DO transitions at desired condition.
 
 ### OLED Display Position
 If text appears in wrong positions, adjust Y-coordinates in:
