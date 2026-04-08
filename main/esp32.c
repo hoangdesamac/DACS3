@@ -33,6 +33,7 @@
 #include "oled_display.h"
 #include "sensors.h"
 #include "motor.h"
+#include "driver/gpio.h"
 
 static const char *TAG = "MAIN";
 
@@ -49,6 +50,7 @@ static EventGroupHandle_t wifi_event_group;
 /* ========== CONFIGURATION ========== */
 #define SENSOR_LIVE_LOG_INTERVAL_SEC 2
 #define SENSOR_SUMMARY_LOG_INTERVAL_SEC 300
+#define CLOTHES_TASK_LOG_INTERVAL_SEC 2
 
 // Target device MAC address for ESP-NOW communication
 // Change this to the MAC address of your receiving device
@@ -101,6 +103,19 @@ static void on_message(const uint8_t *src_mac, const uint8_t *data, int len)
     char buf[256] = {0};
     memcpy(buf, data, len < 255 ? len : 255);
     ESP_LOGI(TAG, "Got message: %s", buf);
+}
+
+static const char *motor_dir_to_str(motor_direction_t dir)
+{
+    switch (dir)
+    {
+    case MOTOR_FORWARD:
+        return "FORWARD";
+    case MOTOR_REVERSE:
+        return "REVERSE";
+    default:
+        return "STOP";
+    }
 }
 
 /**
@@ -389,106 +404,145 @@ static void display_task(void *pvParameters)
  * Automatic Clothes Hanger Control Task with Limit Switches
  *
  * Logic:
- *   - HANG OUT (FORWARD): Sunny (light > 50%) AND NO RAIN
+ *   - HANG OUT (FORWARD): Bright (light > 50%) AND NO RAIN
  *     * Runs motor forward until GPIO5 limit switch pressed (fully extended)
  *
- *   - PULL IN (REVERSE): Rainy OR Dark (light < 50%)
+ *   - PULL IN (REVERSE): Rainy OR Dark (light <= 50%)
  *     * Runs motor reverse until GPIO17 limit switch pressed (fully retracted)
  *
  *   - STOP: Limit switch reached, or conditions don't require change
  *
  * Safety features:
- *   - Motor stops immediately when limit switch is pressed
- *   - Hysteresis: Requires 2 consecutive stable readings before changing state
- *   - Max runtime: 60 seconds failsafe timeout
+ *   - Motor stops when corresponding limit switch is pressed
+ *   - Direct reaction every 1 second (no hysteresis delay)
  */
 static void clothes_hanger_task(void *pvParameters)
 {
-    static motor_direction_t last_state = MOTOR_STOP;
-    static int stable_count = 0;
-    const int HYSTERESIS_COUNT = 2;
+    const float BRIGHT_THRESHOLD = 50.0f;
+    const TickType_t CONTROL_PERIOD = pdMS_TO_TICKS(100); // Giảm delay xuống 100ms để giống delay_custom(100)
+    int log_counter = 0;
 
-    ESP_LOGI(TAG, "Starting automatic clothes hanger control task with limit switches...");
+    // ===== LATCH flags & STATE =====
+    bool startLimitLatched = false;
+    bool endLimitLatched = false;
+    motor_direction_t currentMotorState = MOTOR_STOP;
+
+    ESP_LOGI(TAG, "Starting automatic clothes hanger control task (Arduino Logic Mode)...");
 
     while (1)
     {
-        // ===== READ SENSORS & LIMIT SWITCHES =====
+        // ===== Read Sensor =====
         float light_level = 0.0f;
         int rain_detected = 0;
-        int limit_out_pressed = motor_read_limit_switch_out();
-        int limit_in_pressed = motor_read_limit_switch_in();
+        int light_raw = -1;
+        int rain_raw = -1;
 
         adc_read_light(&light_level);
         rain_read(&rain_detected);
+        light_read_raw(&light_raw);
+        rain_read_raw(&rain_raw);
 
-        // ===== DETERMINE DESIRED STATE =====
-        motor_direction_t desired_state;
+        // ===== Read Limit Switches =====
+        int startPressed = motor_read_limit_switch_in(); // LIMIT_SWITCH_START
+        int endPressed = motor_read_limit_switch_out();  // LIMIT_SWITCH_END
 
-        // Check if already at limit - keep current direction to avoid rapid cycling
-        if (limit_out_pressed && motor_get_direction() == MOTOR_FORWARD)
+        // ===== Definite Motor Direction Logic =====
+        // Logic: Trời sáng VÀ Không mưa -> Phơi đồ (FORWARD)
+        // Ngược lại -> Thu đồ (REVERSE)
+        motor_direction_t desiredMotorState =
+            (light_level > BRIGHT_THRESHOLD && !rain_detected) ? MOTOR_FORWARD : MOTOR_REVERSE;
+
+        // ===== State Machine =====
+        switch (currentMotorState)
         {
-            desired_state = MOTOR_STOP;
-        }
-        else if (limit_in_pressed && motor_get_direction() == MOTOR_REVERSE)
-        {
-            desired_state = MOTOR_STOP;
-        }
-        // light_level: 100% = bright (sunny), 0% = dark
-        else if (light_level > 50.0f && !rain_detected)
-        {
-            // Safe to hang clothes out (bright/sunny); and no rain
-            desired_state = MOTOR_FORWARD;
-        }
-        else
-        {
-            // Pull clothes in (rainy or dark)
-            desired_state = MOTOR_REVERSE;
+
+        // --- 1: Motor Stopped ---
+        case MOTOR_STOP:
+            // Tách riêng điều kiện cho từng chiều để tránh bị kẹt
+            if (desiredMotorState == MOTOR_FORWARD)
+            {
+                // Muốn đi TIẾN: Chỉ cần chưa chạm công tắc giới hạn ĐÍCH (End)
+                // Và reset cờ latch của chiều ngược lại nếu cần
+                if (!endPressed)
+                {
+                    endLimitLatched = false; // Reset latch đích
+                    motor_set_direction(MOTOR_FORWARD);
+                    currentMotorState = MOTOR_FORWARD;
+                    ESP_LOGI(TAG, "CLOTHES HANGER - Chuyển sang PHƠI DO (FORWARD)");
+                }
+            }
+            else if (desiredMotorState == MOTOR_REVERSE)
+            {
+                // Muốn đi LÙI: Chỉ cần chưa chạm công tắc giới hạn ĐẦU (Start)
+                if (!startPressed)
+                {
+                    startLimitLatched = false; // Reset latch đầu
+                    motor_set_direction(MOTOR_REVERSE);
+                    currentMotorState = MOTOR_REVERSE;
+                    ESP_LOGI(TAG, "CLOTHES HANGER - Chuyển sang KÉO VÀO (REVERSE)");
+                }
+            }
+            break;
+
+        // --- 2: Motor Forward (Phơi) ---
+        case MOTOR_FORWARD:
+            // Ưu tiên 1: Chạm công tắc hành trình thì dừng
+            if (endPressed)
+            {
+                motor_set_direction(MOTOR_STOP);
+                currentMotorState = MOTOR_STOP;
+                endLimitLatched = true;
+                ESP_LOGI(TAG, "HẠN CHẾ CUỐI - Dừng motor (Đã phơi xong)");
+            }
+            // Ưu tiên 2: Cảm biến thay đổi ý định (trời mưa/tối)
+            else if (desiredMotorState == MOTOR_REVERSE)
+            {
+                motor_set_direction(MOTOR_STOP);
+                vTaskDelay(pdMS_TO_TICKS(500)); // Đợi dừng hẳn
+                motor_set_direction(MOTOR_REVERSE);
+                currentMotorState = MOTOR_REVERSE;
+                ESP_LOGI(TAG, "CLOTHES HANGER - Đổi ý định: Chuyển sang KÉO VÀO (REVERSE)");
+            }
+            break;
+
+        // --- 3: Motor Reverse (Thu) ---
+        case MOTOR_REVERSE:
+            // Ưu tiên 1: Chạm công tắc hành trình thì dừng
+            if (startPressed)
+            {
+                motor_set_direction(MOTOR_STOP);
+                currentMotorState = MOTOR_STOP;
+                startLimitLatched = true;
+                ESP_LOGI(TAG, "HẠN CHẾ CÓI - Dừng motor (Đã thu xong)");
+            }
+            // Ưu tiên 2: Cảm biến thay đổi ý định (trời nắng lại)
+            else if (desiredMotorState == MOTOR_FORWARD)
+            {
+                motor_set_direction(MOTOR_STOP);
+                vTaskDelay(pdMS_TO_TICKS(500)); // Đợi dừng hẳn
+                motor_set_direction(MOTOR_FORWARD);
+                currentMotorState = MOTOR_FORWARD;
+                ESP_LOGI(TAG, "CLOTHES HANGER - Đổi ý định: Chuyển sang PHƠI DO (FORWARD)");
+            }
+            break;
+
+        default:
+            motor_set_direction(MOTOR_STOP);
+            currentMotorState = MOTOR_STOP;
+            break;
         }
 
-        // ===== ADDITIONAL SAFETY CHECK: Stop motor if limit reached =====
-        // This provides redundancy in case limit switch logic didn't catch it
-        if (motor_get_direction() == MOTOR_FORWARD && limit_out_pressed)
+        // ===== HEARTBEAT LOG (Chu kỳ 2 giây = 20 * 100ms) =====
+        if (++log_counter % 20 == 0)
         {
-            // Motor was going forward, limit OUT reached
-            motor_stop();
-            ESP_LOGI(TAG, "LIMIT SWITCH OUT PRESSED - Clothes fully extended, stopping motor");
-        }
-        else if (motor_get_direction() == MOTOR_REVERSE && limit_in_pressed)
-        {
-            // Motor was going reverse, limit IN reached
-            motor_stop();
-            ESP_LOGI(TAG, "LIMIT SWITCH IN PRESSED - Clothes fully retracted, stopping motor");
+            ESP_LOGI(TAG, "CLOTHES TASK - LDR:%.0f%% | Rain:%s | Limit START:%d END:%d | Curr:%s Desired:%s",
+                     light_level, rain_detected ? "WET" : "DRY",
+                     startPressed, endPressed,
+                     motor_dir_to_str(currentMotorState),
+                     motor_dir_to_str(desiredMotorState));
         }
 
-        // ===== APPLY HYSTERESIS =====
-        if (desired_state == last_state)
-        {
-            stable_count++;
-        }
-        else
-        {
-            stable_count = 1;
-            last_state = desired_state;
-        }
-
-        // Execute motor control only after hysteresis threshold is reached
-        if (stable_count >= HYSTERESIS_COUNT && motor_get_direction() != desired_state)
-        {
-            motor_set_direction(desired_state);
-
-            ESP_LOGI(TAG, "CLOTHES HANGER - Light: %.0f%% | Rain: %s | Limit OUT: %s | Limit IN: %s | Action: %s",
-                     light_level,
-                     rain_detected ? "YES" : "NO",
-                     limit_out_pressed ? "PRESSED" : "open",
-                     limit_in_pressed ? "PRESSED" : "open",
-                     (desired_state == MOTOR_FORWARD) ? "HANG OUT" : (desired_state == MOTOR_REVERSE) ? "PULL IN"
-                                                                                                      : "STOP");
-
-            stable_count = 0;
-        }
-
-        // Check every 5 seconds
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(CONTROL_PERIOD); // Delay 100ms
     }
 }
 
@@ -552,6 +606,27 @@ void app_main(void)
     }
     vTaskDelay(pdMS_TO_TICKS(500));
 
+    // ===== CREATE CLOTHES HANGER CONTROL TASK (START EARLY) =====
+    // Start right after motor init so hanger automation runs immediately at boot.
+    ESP_LOGI(TAG, "Creating automatic clothes hanger control task...");
+    BaseType_t clothes_task_created = xTaskCreate(
+        clothes_hanger_task, // Task function
+        "clothes_hanger",    // Task name (for debugging)
+        4096,                // Stack size in bytes
+        NULL,                // Task input parameter
+        5,                   // Priority (higher than display for quick motor reaction)
+        NULL                 // Task handle (not needed)
+    );
+    if (clothes_task_created != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create clothes_hanger task");
+    }
+    else
+    {
+        ESP_LOGI(TAG, "clothes_hanger task created successfully");
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     // ===== TIMEZONE CONFIGURATION =====
     // Set timezone to Vietnam (ICT, UTC+7)
     // This applies to all time functions like localtime()
@@ -592,21 +667,6 @@ void app_main(void)
         NULL,           // Task input parameter
         4,              // Priority (0-24, lowered to 4)
         NULL            // Task handle (not needed)
-    );
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    // ===== CREATE CLOTHES HANGER CONTROL TASK =====
-    // Creates a FreeRTOS task for automatic clothes hanger control
-    // Monitors LDR (light), rain sensor, and limit switches to hang/pull in clothes
-    // Task checks conditions every 5 seconds and stops motor when limit reached
-    ESP_LOGI(TAG, "Creating automatic clothes hanger control task...");
-    xTaskCreate(
-        clothes_hanger_task, // Task function
-        "clothes_hanger",    // Task name (for debugging)
-        4096,                // Stack size in bytes
-        NULL,                // Task input parameter
-        3,                   // Priority (0-24, lower than display)
-        NULL                 // Task handle (not needed)
     );
     vTaskDelay(pdMS_TO_TICKS(500));
 
