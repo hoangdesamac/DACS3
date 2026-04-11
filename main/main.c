@@ -17,14 +17,16 @@ static const char *TAG = "MAIN_APP";
 void app_main(void) {
     ESP_LOGI(TAG, "Hệ thống đang khởi động...");
 
-    // Khởi tạo GPIO
+    // 1. FIX LỖI GPIO: Đổi thành INPUT_OUTPUT để đọc lại được trạng thái
     gpio_reset_pin(GPIO_PIN_RELAY);
-    gpio_set_direction(GPIO_PIN_RELAY, GPIO_MODE_OUTPUT);
+    gpio_set_direction(GPIO_PIN_RELAY, GPIO_MODE_INPUT_OUTPUT); // <--- QUAN TRỌNG
     gpio_set_level(GPIO_PIN_RELAY, 0);
 
-    // 1. Khởi tạo WiFi
+    // 2. Khởi tạo WiFi
     wifi_init_sta();
-    vTaskDelay(10000 / portTICK_PERIOD_MS); // Chờ WiFi bắt sóng để lấy Channel
+    
+    // 3. FIX LỖI CHỜ LÂU: Giảm từ 10s xuống 2.5s vì WiFi kết nối rất nhanh
+    vTaskDelay(2500 / portTICK_PERIOD_MS); 
     
     // In địa chỉ MAC
     uint8_t mac[6];
@@ -34,16 +36,13 @@ void app_main(void) {
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_LOGI(TAG, "=========================================");
     
-    // 2. Khởi tạo ESP-NOW (Chạy sau WiFi)
+    // Khởi tạo ESP-NOW và MQTT
     init_s3_espnow();
-
-    // 3. Khởi tạo MQTT
     mqtt_app_start();
     
     // Vòng lặp chính
     while (1) {
-        // Yêu cầu ESP-Node gửi dữ liệu
         request_data_from_node();
-        vTaskDelay(5000 / portTICK_PERIOD_MS); // 5 giây gửi 1 lệnh
+        vTaskDelay(5000 / portTICK_PERIOD_MS); 
     }
 }
