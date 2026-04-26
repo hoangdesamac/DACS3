@@ -301,7 +301,7 @@ void oled_display_sensor_data(const sensor_data_t *data)
     snprintf(line, sizeof(line), "Light: %s", light_status);
     oled_draw_string(0, 8, line);
 
-    const char *rain_status = data->rain_detected ? "Wet" : "Dry";
+    const char *rain_status = data->rain_detected ? "YES" : "NO";
     snprintf(line, sizeof(line), "Rain: %s", rain_status);
     oled_draw_string(0, 16, line);
 

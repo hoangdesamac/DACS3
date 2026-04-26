@@ -56,10 +56,28 @@ static EventGroupHandle_t wifi_event_group;
 // Change this to the MAC address of your receiving device
 static uint8_t peer_mac[] = {0x3C, 0xDC, 0x75, 0x6E, 0x98, 0x2C};
 
+/* ========== DEVICE PIN SETTINGS ========== */
+#define PIN_FAN_MIST 25 // (Ví dụ) Chân điều khiển Relay Quạt + Máy phun sương
+#define PIN_LIGHT 26    // (Ví dụ) Chân điều khiển Relay Đèn
+#define PIN_DOOR 27     // (Ví dụ) Chân điều khiển Relay/Khóa Cửa
+
+// Trạng thái các thiết bị (State lưu lại để theo dõi)
+static bool state_fan_mist = false;
+static bool state_light = false;
+static bool state_door_open = false;
+
 /* ========== SHARED DATA ========== */
 // Global sensor data structure for display
 // This is updated by the sensor task and read by main task for ESP-NOW sending
 static sensor_data_t display_data = {0};
+
+typedef enum
+{
+    MODE_AUTO,
+    MODE_MANUAL_FORWARD,
+    MODE_MANUAL_REVERSE
+} hanger_mode_t;
+static volatile hanger_mode_t current_hanger_mode = MODE_AUTO; // Mặc định chạy Tự Động
 
 /**
  * WiFi event handler
@@ -99,10 +117,88 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
  */
 static void on_message(const uint8_t *src_mac, const uint8_t *data, int len)
 {
-    // Copy message to safe buffer (limit to 255 bytes)
-    char buf[256] = {0};
-    memcpy(buf, data, len < 255 ? len : 255);
-    ESP_LOGI(TAG, "Got message: %s", buf);
+    // Kiểm tra xem dữ liệu đến có phải là struct sensor_data_t không thông qua độ dài (29 byte)
+    if (len == sizeof(sensor_data_t))
+    {
+        // Ép kiểu trực tiếp byte từ mạng thành struct
+        sensor_data_t *incoming_data = (sensor_data_t *)data;
+
+        ESP_LOGI(TAG, "[ESP-NOW RX] MAC: %02x:%02x:%02x:%02x:%02x:%02x | Temp: %.1fC | Hum: %.1f%% | Light: %.0f%% | Rain: %s",
+                 src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5],
+                 incoming_data->temperature,
+                 incoming_data->humidity,
+                 incoming_data->light_level,
+                 incoming_data->rain_detected ? "YES" : "NO");
+    }
+    else
+    {
+        // Coi dữ liệu gửi tới là một chuỗi văn bản (String) thông thường
+        char buf[256] = {0};
+        memcpy(buf, data, len < 255 ? len : 255);
+
+        // --- NHẬN LỆNH ĐIỀU KHIỂN TỪ XA ---
+        if (strncmp(buf, "CMD:FORWARD", 11) == 0)
+        {
+            current_hanger_mode = MODE_MANUAL_FORWARD;
+            ESP_LOGI(TAG, "[ESP-NOW RX] Bật CHẾ ĐỘ THỦ CÔNG: PHƠI ĐỒ (FORWARD)");
+        }
+        else if (strncmp(buf, "CMD:REVERSE", 11) == 0)
+        {
+            current_hanger_mode = MODE_MANUAL_REVERSE;
+            ESP_LOGI(TAG, "[ESP-NOW RX] Bật CHẾ ĐỘ THỦ CÔNG: CẤT ĐỒ (REVERSE)");
+        }
+        else if (strncmp(buf, "CMD:AUTO", 8) == 0)
+        {
+            current_hanger_mode = MODE_AUTO;
+            ESP_LOGI(TAG, "[ESP-NOW RX] Bật lại CHẾ ĐỘ TỰ ĐỘNG (Theo cảm biến)");
+        }
+        // ===== LỆNH CHO QUẠT & PHUN SƯƠNG =====
+        else if (strncmp(buf, "CMD:FAN_ON", 10) == 0)
+        {
+            state_fan_mist = true;
+            drv8833_ac_set_power(true); // Fan + Mist = 1 device
+            ESP_LOGI(TAG, "[ESP-NOW RX] Lệnh: BẬT Quạt + Phun sương");
+        }
+        else if (strncmp(buf, "CMD:FAN_OFF", 11) == 0)
+        {
+            state_fan_mist = false;
+            drv8833_ac_set_power(false); // Fan + Mist = 1 device
+            ESP_LOGI(TAG, "[ESP-NOW RX] Lệnh: TẮT Quạt + Phun sương");
+        }
+        // ===== LỆNH CHO ĐÈN =====
+        else if (strncmp(buf, "CMD:LIGHT_ON", 12) == 0)
+        {
+            state_light = true;
+            gpio_set_level(PIN_LIGHT, 1);
+            ESP_LOGI(TAG, "[ESP-NOW RX] Lệnh: BẬT Đèn");
+        }
+        else if (strncmp(buf, "CMD:LIGHT_OFF", 13) == 0)
+        {
+            state_light = false;
+            gpio_set_level(PIN_LIGHT, 0);
+            ESP_LOGI(TAG, "[ESP-NOW RX] Lệnh: TẮT Đèn");
+        }
+        // ===== LỆNH CHO CỬA =====
+        else if (strncmp(buf, "CMD:DOOR_OPEN", 13) == 0)
+        {
+            state_door_open = true;
+            gpio_set_level(PIN_DOOR, 1);
+            ESP_LOGI(TAG, "[ESP-NOW RX] Lệnh: MỞ Cửa");
+        }
+        else if (strncmp(buf, "CMD:DOOR_CLOSE", 14) == 0)
+        {
+            state_door_open = false;
+            gpio_set_level(PIN_DOOR, 0);
+            ESP_LOGI(TAG, "[ESP-NOW RX] Lệnh: ĐÓNG Cửa");
+        }
+        // Không xác định được lệnh
+        else
+        {
+            ESP_LOGI(TAG, "[ESP-NOW RX] MAC: %02x:%02x:%02x:%02x:%02x:%02x | Msg Không rõ lệnh: %s",
+                     src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5],
+                     buf);
+        }
+    }
 }
 
 static const char *motor_dir_to_str(motor_direction_t dir)
@@ -370,29 +466,22 @@ static void display_task(void *pvParameters)
         // Monitor-friendly full sensor line for easier tracking
         if (update_count % SENSOR_LIVE_LOG_INTERVAL_SEC == 0)
         {
-            ESP_LOGI(TAG, "SENSOR LIVE - %s | DHT:%s T=%.1fC H=%.1f%% | LDR:%s DO=%d => %s (%.0f%%) | RAIN:%s DO=%d => %s",
+            ESP_LOGI(TAG, "[SENSOR] %s | Temp: %.1fC | Hum: %.1f%% | Light: %.0f%% | Rain: %s",
                      display_data.time_str,
-                     (dht_status == 0) ? "OK" : "ERR",
                      display_data.temperature,
                      display_data.humidity,
-                     (light_status == 0) ? "OK" : "ERR",
-                     light_raw,
-                     (display_data.light_level >= 50.0f) ? "BRIGHT" : "DARK",
                      display_data.light_level,
-                     (rain_status == 0) ? "OK" : "ERR",
-                     rain_raw,
-                     display_data.rain_detected ? "WET" : "DRY");
+                     display_data.rain_detected ? "YES" : "NO");
         }
 
         // Full sensor summary at a longer interval
         if (update_count % SENSOR_SUMMARY_LOG_INTERVAL_SEC == 0)
         {
-            ESP_LOGI(TAG, "SENSORS UPDATE - Time: %s | Temp: %.1f°C | Humidity: %.1f%% | Light: %.0f%% | Rain: %s",
-                     display_data.time_str,
+            ESP_LOGI(TAG, "[SUMMARY] Temp: %.1fC | Hum: %.1f%% | Light: %.0f%% | Rain: %s",
                      display_data.temperature,
                      display_data.humidity,
                      display_data.light_level,
-                     display_data.rain_detected ? "WET" : "DRY");
+                     display_data.rain_detected ? "YES" : "NO");
         }
 
         // Update display every 1 second to show live sensor updates
@@ -418,16 +507,22 @@ static void display_task(void *pvParameters)
  */
 static void clothes_hanger_task(void *pvParameters)
 {
-    const float BRIGHT_THRESHOLD = 50.0f;
-    const TickType_t CONTROL_PERIOD = pdMS_TO_TICKS(100); // Giảm delay xuống 100ms để giống delay_custom(100)
+    const TickType_t CONTROL_PERIOD = pdMS_TO_TICKS(100); // Chu kỳ cập nhật 100ms
     int log_counter = 0;
 
-    // ===== LATCH flags & STATE =====
-    bool startLimitLatched = false;
-    bool endLimitLatched = false;
-    motor_direction_t currentMotorState = MOTOR_STOP;
+    // --- CẤU HÌNH THUẬT TOÁN THÔNG MINH (HYSTERESIS + TIMER) ---
+    const float LIGHT_HIGH_THRESHOLD = 55.0f; // Sáng hơn 55% mới phơi
+    const float LIGHT_LOW_THRESHOLD = 45.0f;  // Tối hơn 45% mới cất
+    const int STABLE_TIME_CYCLES = 30;        // 30 chu kỳ * 100ms = 3 giây chống nhiễu
 
-    ESP_LOGI(TAG, "Starting automatic clothes hanger control task (Arduino Logic Mode)...");
+    int bright_stable_count = 0;
+    int dark_stable_count = 0;
+
+    // ===== STATE =====
+    motor_direction_t currentMotorState = MOTOR_STOP;
+    motor_direction_t desiredMotorState = MOTOR_REVERSE; // Mặc định khởi động hệ thống thì thu vào cho an toàn
+
+    ESP_LOGI(TAG, "Starting SMART automatic clothes hanger control task...");
 
     while (1)
     {
@@ -446,11 +541,55 @@ static void clothes_hanger_task(void *pvParameters)
         int startPressed = motor_read_limit_switch_in(); // LIMIT_SWITCH_START
         int endPressed = motor_read_limit_switch_out();  // LIMIT_SWITCH_END
 
-        // ===== Definite Motor Direction Logic =====
-        // Logic: Trời sáng VÀ Không mưa -> Phơi đồ (FORWARD)
-        // Ngược lại -> Thu đồ (REVERSE)
-        motor_direction_t desiredMotorState =
-            (light_level > BRIGHT_THRESHOLD && !rain_detected) ? MOTOR_FORWARD : MOTOR_REVERSE;
+        // ===== SMART Motor Direction Logic =====
+        if (current_hanger_mode != MODE_AUTO)
+        {
+            // ---> ĐIỀU KHIỂN BẰNG TAY TỪ ESP KHÁC <---
+            desiredMotorState = (current_hanger_mode == MODE_MANUAL_FORWARD) ? MOTOR_FORWARD : MOTOR_REVERSE;
+        }
+        else
+        {
+            // ---> CHẾ ĐỘ TỰ ĐỘNG BẰNG CẢM BIẾN <---
+            if (rain_detected)
+            {
+                // ƯU TIÊN 1: Nếu trời mưa -> THU VÀO NGAY LẬP TỨC (không chờ độ trễ), reset các bộ đếm sáng
+                desiredMotorState = MOTOR_REVERSE;
+                bright_stable_count = 0;
+                dark_stable_count = 0;
+            }
+            else
+            {
+                // ƯU TIÊN 2: Xử lý cảm biến ánh sáng bằng vùng đệm Hysteresis
+                if (light_level > LIGHT_HIGH_THRESHOLD)
+                {
+                    bright_stable_count++;
+                    dark_stable_count = 0;
+                }
+                else if (light_level < LIGHT_LOW_THRESHOLD)
+                {
+                    dark_stable_count++;
+                    bright_stable_count = 0;
+                }
+                else
+                {
+                    // Rơi vào khoảng đệm (45% -> 55%): Giữ vững quyết định cũ, chống lảo đảo (flap)
+                    bright_stable_count = 0;
+                    dark_stable_count = 0;
+                }
+
+                // Chỉ thay đổi quyết định khi môi trường sáng/tối ổn định đủ lâu (VD: 3 giây do đám mây bay ngang)
+                if (bright_stable_count >= STABLE_TIME_CYCLES)
+                {
+                    desiredMotorState = MOTOR_FORWARD;        // Phơi
+                    bright_stable_count = STABLE_TIME_CYCLES; // Chống tràn
+                }
+                else if (dark_stable_count >= STABLE_TIME_CYCLES)
+                {
+                    desiredMotorState = MOTOR_REVERSE;      // Thu
+                    dark_stable_count = STABLE_TIME_CYCLES; // Chống tràn
+                }
+            }
+        }
 
         // ===== State Machine =====
         switch (currentMotorState)
@@ -465,7 +604,6 @@ static void clothes_hanger_task(void *pvParameters)
                 // Và reset cờ latch của chiều ngược lại nếu cần
                 if (!endPressed)
                 {
-                    endLimitLatched = false; // Reset latch đích
                     motor_set_direction(MOTOR_FORWARD);
                     currentMotorState = MOTOR_FORWARD;
                     ESP_LOGI(TAG, "CLOTHES HANGER - Chuyển sang PHƠI DO (FORWARD)");
@@ -476,7 +614,6 @@ static void clothes_hanger_task(void *pvParameters)
                 // Muốn đi LÙI: Chỉ cần chưa chạm công tắc giới hạn ĐẦU (Start)
                 if (!startPressed)
                 {
-                    startLimitLatched = false; // Reset latch đầu
                     motor_set_direction(MOTOR_REVERSE);
                     currentMotorState = MOTOR_REVERSE;
                     ESP_LOGI(TAG, "CLOTHES HANGER - Chuyển sang KÉO VÀO (REVERSE)");
@@ -491,7 +628,6 @@ static void clothes_hanger_task(void *pvParameters)
             {
                 motor_set_direction(MOTOR_STOP);
                 currentMotorState = MOTOR_STOP;
-                endLimitLatched = true;
                 ESP_LOGI(TAG, "HẠN CHẾ CUỐI - Dừng motor (Đã phơi xong)");
             }
             // Ưu tiên 2: Cảm biến thay đổi ý định (trời mưa/tối)
@@ -512,7 +648,6 @@ static void clothes_hanger_task(void *pvParameters)
             {
                 motor_set_direction(MOTOR_STOP);
                 currentMotorState = MOTOR_STOP;
-                startLimitLatched = true;
                 ESP_LOGI(TAG, "HẠN CHẾ CÓI - Dừng motor (Đã thu xong)");
             }
             // Ưu tiên 2: Cảm biến thay đổi ý định (trời nắng lại)
@@ -535,19 +670,54 @@ static void clothes_hanger_task(void *pvParameters)
         // ===== HEARTBEAT LOG (Chu kỳ 2 giây = 20 * 100ms) =====
         if (++log_counter % 20 == 0)
         {
-            ESP_LOGI(TAG, "CLOTHES TASK - LDR:%.0f%% | Rain:%s | Limit START:%d END:%d | Curr:%s Desired:%s",
-                     light_level, rain_detected ? "WET" : "DRY",
-                     startPressed, endPressed,
+            ESP_LOGI(TAG, "[MOTOR] Current: %-7s | Target: %-7s | Light: %3.0f%% | Mưa: %s | Limit[In:%d, Out:%d]",
                      motor_dir_to_str(currentMotorState),
-                     motor_dir_to_str(desiredMotorState));
+                     motor_dir_to_str(desiredMotorState),
+                     light_level,
+                     rain_detected ? "CÓ" : "KHÔNG",
+                     startPressed, endPressed);
         }
 
         vTaskDelay(CONTROL_PERIOD); // Delay 100ms
     }
 }
 
+// static void debug_fan_task(void *pvParameters)
+// {
+//     TaskHandle_t notify_task = (TaskHandle_t)pvParameters;
+//     ESP_LOGI(TAG, "Starting DRV8833 boot self-test (10s): FAN 3s -> MIST 3s -> BOTH 4s");
+
+//     // 1) FAN only (3s)
+//     ESP_LOGI(TAG, "TEST1/3: FAN ON (GPIO25/26), MIST OFF (GPIO27/12)");
+//     drv8833_fan_set_power(true);
+//     drv8833_ultrasonic_set_power(false);
+//     vTaskDelay(pdMS_TO_TICKS(3000));
+
+//     // 2) MIST only (3s)
+//     ESP_LOGI(TAG, "TEST2/3: MIST ON (GPIO27/12), FAN OFF (GPIO25/26)");
+//     drv8833_fan_set_power(false);
+//     drv8833_ultrasonic_set_power(true);
+//     vTaskDelay(pdMS_TO_TICKS(3000));
+
+//     // 3) BOTH (AC) (4s)
+//     ESP_LOGI(TAG, "TEST3/3: AC ON (fan + mist)");
+//     drv8833_ac_set_power(true);
+//     vTaskDelay(pdMS_TO_TICKS(4000));
+
+//     ESP_LOGI(TAG, "DRV8833 self-test: OFF (fan + mist)");
+//     drv8833_ac_set_power(false);
+
+//     ESP_LOGI(TAG, "DRV8833 boot self-test complete");
+//     if (notify_task != NULL)
+//     {
+//         xTaskNotifyGive(notify_task);
+//     }
+//     vTaskDelete(NULL);
+// }
+
 /**
- * Application entry point
+ * Build NVS flash...
+
  *
  * Initialization sequence:
  *   1. NVS flash initialization (needed for WiFi/BLE)
@@ -605,6 +775,44 @@ void app_main(void)
         ESP_LOGE(TAG, "Motor control initialization FAILED");
     }
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    // // ===== TẠO TASK DEBUG CHẠY QUẠT DRV8833 (TEST NGAY KHI KHỞI ĐỘNG) =====
+    // // Chạy sớm để bạn quan sát quạt hoạt động trước khi WiFi/SNTP có thể làm chậm boot.
+    // ESP_LOGI(TAG, "Creating debug fan task (boot test)...");
+    // TaskHandle_t self_task = xTaskGetCurrentTaskHandle();
+    // BaseType_t debug_task_created = xTaskCreate(
+    //     debug_fan_task, // Task function
+    //     "debug_fan",    // Task name (for debugging)
+    //     2048,           // Stack size
+    //     self_task,      // Notify this task when self-test completes
+    //     3,              // Priority
+    //     NULL            // Task handle (not needed)
+    // );
+    // if (debug_task_created == pdPASS)
+    // {
+    //     // Wait for self-test to finish before configuring other GPIOs (avoid conflicts on GPIO27/26).
+    //     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(12000));
+    // }
+    // else
+    // {
+    //     ESP_LOGE(TAG, "Failed to create debug_fan task");
+    // }
+    
+
+    // ===== PERIPHERAL RELAYS INITIALIZATION =====
+    ESP_LOGI(TAG, "Initializing peripheral relays (Door)...");
+    // LƯU Ý: Chân 25, 26 đã được dùng cho DRV8833 bên trong motor_init() (IN1, IN2)
+    // Nếu bạn muốn dùng motor DRV8833 thì không cấu hình lại làm RELAY ở đây!
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << PIN_DOOR), // Chỉ cài đặt chân không bị trùng lặp
+        .pull_down_en = 0,
+        .pull_up_en = 0};
+    gpio_config(&io_conf);
+
+    // Tắt các thiết bị mặc định khi vừa khởi động
+    gpio_set_level(PIN_DOOR, 0);
 
     // ===== CREATE CLOTHES HANGER CONTROL TASK (START EARLY) =====
     // Start right after motor init so hanger automation runs immediately at boot.

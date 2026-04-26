@@ -1,5 +1,5 @@
 /**
- * Motor Control Module for L298 Motor Driver with Limit Switches
+ * Motor Control Module for L293 motor driver + DRV8833 auxiliaries
  *
  * Limit switch wiring (NC - Normally Closed contacts):
  *   - GPIO5  (Limit OUT): NC pin → GPIO5, COM pin → GND (clothes fully OUT when pressed HIGH)
@@ -8,9 +8,14 @@
  * When button NOT pressed (normal): GPIO = LOW (0) - switch open
  * When button pressed (triggered): GPIO = HIGH (1) - switch contacts connected
  *
- * Motor control pins:
+ * L293 motor control pins:
  *   - GPIO18 (IN1): Forward control
  *   - GPIO19 (IN2): Reverse control
+ *   - GPIO13 (ENA): PWM speed control
+ *
+ * DRV8833 auxiliary pins:
+ *   - GPIO25 (IN1), GPIO26 (IN2): Fan channel
+ *   - GPIO27 (IN3), GPIO12 (IN4): Ultrasonic transducer channel
  *
  * Motor direction truth table:
  *   IN1 | IN2 | Motor
@@ -28,9 +33,13 @@
 static const char *TAG = "MOTOR";
 
 /* ========== PIN CONFIGURATION ========== */
-#define MOTOR_IN1_PIN GPIO_NUM_18      // Forward control
-#define MOTOR_IN2_PIN GPIO_NUM_19      // Reverse control
-#define MOTOR_ENA_PIN GPIO_NUM_13      // PWM Enable control
+#define MOTOR_IN1_PIN GPIO_NUM_18 // Forward control
+#define MOTOR_IN2_PIN GPIO_NUM_19 // Reverse control
+#define MOTOR_ENA_PIN GPIO_NUM_13 // PWM Enable control
+#define DRV8833_FAN_IN1_PIN GPIO_NUM_25
+#define DRV8833_FAN_IN2_PIN GPIO_NUM_26
+#define DRV8833_US_IN3_PIN GPIO_NUM_27
+#define DRV8833_US_IN4_PIN GPIO_NUM_12
 #define MOTOR_LIMIT_OUT_PIN GPIO_NUM_5 // Clothes OUT position (active LOW)
 #define MOTOR_LIMIT_IN_PIN GPIO_NUM_17 // Clothes IN position (active LOW)
 
@@ -51,11 +60,13 @@ static motor_direction_t current_direction = MOTOR_STOP;
  */
 int motor_init(void)
 {
-    ESP_LOGI(TAG, "Initializing motor control with limit switches...");
+    ESP_LOGI(TAG, "Initializing L293 motor + DRV8833 outputs with limit switches...");
 
-    // ===== MOTOR CONTROL PINS (IN1, IN2) =====
+    // ===== OUTPUT PINS (L293 IN1/IN2 + DRV8833 IN1/IN2/IN3/IN4) =====
     gpio_config_t motor_conf = {
-        .pin_bit_mask = (1ULL << MOTOR_IN1_PIN) | (1ULL << MOTOR_IN2_PIN),
+        .pin_bit_mask = (1ULL << MOTOR_IN1_PIN) | (1ULL << MOTOR_IN2_PIN) |
+                        (1ULL << DRV8833_FAN_IN1_PIN) | (1ULL << DRV8833_FAN_IN2_PIN) |
+                        (1ULL << DRV8833_US_IN3_PIN) | (1ULL << DRV8833_US_IN4_PIN),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -102,15 +113,19 @@ int motor_init(void)
         return -1;
     }
 
-    // Initialize both motor pins to LOW (motor stop)
+    // Initialize motor and DRV8833 channels to OFF
     gpio_set_level(MOTOR_IN1_PIN, 0);
     gpio_set_level(MOTOR_IN2_PIN, 0);
+    gpio_set_level(DRV8833_FAN_IN1_PIN, 0);
+    gpio_set_level(DRV8833_FAN_IN2_PIN, 0);
+    gpio_set_level(DRV8833_US_IN3_PIN, 0);
+    gpio_set_level(DRV8833_US_IN4_PIN, 0);
     current_direction = MOTOR_STOP;
 
     ESP_LOGI(TAG, "Motor control initialized:");
-    ESP_LOGI(TAG, "  - GPIO18 (IN1): Forward control");
-    ESP_LOGI(TAG, "  - GPIO19 (IN2): Reverse control");
-    ESP_LOGI(TAG, "  - GPIO13 (ENA): PWM Speed control (5kHz 8-bit)");
+    ESP_LOGI(TAG, "  - L293: GPIO18(IN1), GPIO19(IN2), GPIO13(ENA PWM)");
+    ESP_LOGI(TAG, "  - DRV8833 fan: GPIO25(IN1), GPIO26(IN2)");
+    ESP_LOGI(TAG, "  - DRV8833 ultrasonic: GPIO27(IN3), GPIO12(IN4)");
     ESP_LOGI(TAG, "  - GPIO5 (Limit OUT): NC switch");
     ESP_LOGI(TAG, "  - GPIO17 (Limit IN): NC switch");
 
@@ -189,6 +204,61 @@ int motor_set_direction(motor_direction_t direction)
 int motor_stop(void)
 {
     return motor_set_direction(MOTOR_STOP);
+}
+
+int drv8833_fan_set_power(bool on)
+{
+    if (on)
+    {
+        gpio_set_level(DRV8833_FAN_IN1_PIN, 1);
+        gpio_set_level(DRV8833_FAN_IN2_PIN, 0);
+        ESP_LOGI(TAG, "🔥 DRV8833 FAN ON - GPIO25=%d, GPIO26=%d",
+                 gpio_get_level(DRV8833_FAN_IN1_PIN),
+                 gpio_get_level(DRV8833_FAN_IN2_PIN));
+    }
+    else
+    {
+        gpio_set_level(DRV8833_FAN_IN1_PIN, 0);
+        gpio_set_level(DRV8833_FAN_IN2_PIN, 0);
+        ESP_LOGI(TAG, "❌ DRV8833 FAN OFF - GPIO25=%d, GPIO26=%d",
+                 gpio_get_level(DRV8833_FAN_IN1_PIN),
+                 gpio_get_level(DRV8833_FAN_IN2_PIN));
+    }
+
+    ESP_LOGI(TAG, "DRV8833 fan %s", on ? "ON" : "OFF");
+    return 0;
+}
+
+int drv8833_ultrasonic_set_power(bool on)
+{
+    if (on)
+    {
+        gpio_set_level(DRV8833_US_IN3_PIN, 1);
+        gpio_set_level(DRV8833_US_IN4_PIN, 0);
+        ESP_LOGI(TAG, "💦 DRV8833 ULTRASONIC ON - GPIO27=%d, GPIO12=%d",
+                 gpio_get_level(DRV8833_US_IN3_PIN),
+                 gpio_get_level(DRV8833_US_IN4_PIN));
+    }
+    else
+    {
+        gpio_set_level(DRV8833_US_IN3_PIN, 0);
+        gpio_set_level(DRV8833_US_IN4_PIN, 0);
+        ESP_LOGI(TAG, "❌ DRV8833 ULTRASONIC OFF - GPIO27=%d, GPIO12=%d",
+                 gpio_get_level(DRV8833_US_IN3_PIN),
+                 gpio_get_level(DRV8833_US_IN4_PIN));
+    }
+
+    ESP_LOGI(TAG, "DRV8833 ultrasonic %s", on ? "ON" : "OFF");
+    return 0;
+}
+
+int drv8833_ac_set_power(bool on)
+{
+    // Treat fan + mist as one device ("AC")
+    drv8833_fan_set_power(on);
+    drv8833_ultrasonic_set_power(on);
+    ESP_LOGI(TAG, "DRV8833 AC (fan+mist) %s", on ? "ON" : "OFF");
+    return 0;
 }
 
 /**
