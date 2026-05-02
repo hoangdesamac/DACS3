@@ -16,3 +16,7 @@ sdkconfig.old
 # OS
 .DS_Store
 Thumbs.db
+
+# Environment variables
+.env
+backend/.env

@@ -1,3 +1,5 @@
+require('dotenv').config(); // 👈 Thêm dòng này lên đỉnh file để đọc file .env
+
 const express = require('express');
 const mqtt = require('mqtt');
 const { Pool } = require('pg');
@@ -12,10 +14,10 @@ const app = express();
 app.use(express.json());
 
 // =========================================================================
-// 🗄️ 1. KẾT NỐI VÀ KHỞI TẠO DATABASE (POSTGRESQL TRÊN RENDER)
+// 🗄️ 1. KẾT NỐI VÀ KHỞI TẠO DATABASE (POSTGRESQL TRÊN SUPABASE)
 // =========================================================================
-// ⚠️ NHỚ DÁN LINK EXTERNAL URL CỦA BẠN VÀO ĐÂY (Giữ nguyên ?sslmode=require ở cuối)
-const DB_URL = "postgresql://smarthome_admin:dhhhPDhRzSkaO6NxeLAx5sxsKP9XNrju@dpg-d6t20rma2pns738h4tk0-a.singapore-postgres.render.com/smarthome_v72a?sslmode=require";
+// 👈 Gọi đường link từ file .env ra thay vì viết cứng
+const DB_URL = process.env.DATABASE_URL;
 
 const pool = new Pool({
     connectionString: DB_URL,
@@ -48,7 +50,7 @@ const initDB = async () => {
         `);
         console.log("✅ Đã khởi tạo cấu trúc Bảng (Schema) thành công!");
 
-        // Tạo sẵn 2 thiết bị mẫu vào DB nếu bảng đang trống (giống mock data cũ của bạn)
+        // Tạo sẵn 2 thiết bị mẫu vào DB nếu bảng đang trống
         await pool.query(`
             INSERT INTO devices (id, name, type, is_online)
             VALUES
@@ -59,22 +61,6 @@ const initDB = async () => {
     } catch (err) {
         console.error("❌ Lỗi khi khởi tạo DB:", err);
     }
-};
-
-// =========================================================================
-// 🔐 AUTH MIDDLEWARE & HELPERS
-// =========================================================================
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) return res.status(401).json({ error: 'Token required' });
-
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Invalid token' });
-        req.user = user;
-        next();
-    });
 };
 
 const initUsersTable = async () => {
@@ -94,13 +80,29 @@ const initUsersTable = async () => {
 };
 
 // =========================================================================
+// 🔐 AUTH MIDDLEWARE & HELPERS
+// =========================================================================
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) return res.status(401).json({ error: 'Token required' });
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: 'Invalid token' });
+        req.user = user;
+        next();
+    });
+};
+
+// =========================================================================
 // 🌐 2. KẾT NỐI MQTT (HIVEMQ BROKER)
 // =========================================================================
-const MQTT_BROKER = 'mqtt://broker.hivemq.com'; 
+const MQTT_BROKER = 'mqtt://broker.emqx.io'; 
 const client = mqtt.connect(MQTT_BROKER);
 
 client.on('connect', () => {
-    console.log('✅ Backend đã kết nối HiveMQ Broker!');
+    console.log('✅ Backend đã kết nối EMQX Broker!');
     client.subscribe('DACS3/esp32_to_app');
 });
 
@@ -113,12 +115,10 @@ client.on('message', async (topic, message) => {
             const payload = JSON.parse(message.toString());
             console.log("📥 MQTT NHẬN TỪ ESP32:", payload);
             
-            // Giả sử payload từ ESP32 có dạng: 
-            // { id: "device_002", state: "ON", temp: 30.5, hum: 60, soil: 40, rain: 0 }
             const isPoweredOn = (payload.state === "ON" || payload.relay_state === 1);
-            const deviceId = payload.id || "device_002"; // Fallback nếu ESP gửi thiếu ID
+            const deviceId = payload.id || "device_002";
 
-            // 3.1. Cập nhật trạng thái thiết bị (Upsert: Có thì update, chưa có thì insert)
+            // 3.1. Cập nhật trạng thái thiết bị
             await pool.query(`
                 INSERT INTO devices (id, name, type, is_online, last_updated)
                 VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
@@ -126,7 +126,7 @@ client.on('message', async (topic, message) => {
                 DO UPDATE SET is_online = EXCLUDED.is_online, last_updated = CURRENT_TIMESTAMP;
             `, [deviceId, "Thiết bị ESP32", "NODE", isPoweredOn]);
 
-            // 3.2. Lưu trữ dữ liệu cảm biến vào bảng telemetry (chỉ lưu nếu có gửi kèm nhiệt độ)
+            // 3.2. Lưu trữ dữ liệu cảm biến
             if (payload.temp !== undefined) {
                 await pool.query(`
                     INSERT INTO telemetry (device_id, temperature, humidity, soil_moisture, rain_detected, relay_state)
@@ -147,37 +147,20 @@ client.on('message', async (topic, message) => {
 // 📱 4. API CHO APP GỌI LÊN LẤY DỮ LIỆU
 // =========================================================================
 
-// =========================================================================
-// 🔐 4.1 AUTH ENDPOINTS
-// =========================================================================
-
-// POST /api/auth/register
 app.post('/api/auth/register', async (req, res) => {
     const { email, password } = req.body;
-
-    if (!email || !password) {
-        return res.status(400).json({ error: 'Email and password required' });
-    }
-    if (password.length < 6) {
-        return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    }
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
     try {
-        // Check existing user
         const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-        if (existing.rows.length > 0) {
-            return res.status(400).json({ error: 'Email already exists' });
-        }
+        if (existing.rows.length > 0) return res.status(400).json({ error: 'Email already exists' });
 
-        // Hash password
         const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
-        // Insert user
         const result = await pool.query(
             'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id',
             [email, passwordHash]
         );
-
         res.status(201).json({ userId: result.rows[0].id, message: 'User created' });
     } catch (err) {
         console.error('Register error:', err);
@@ -185,34 +168,18 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// POST /api/auth/login
 app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
-
-    if (!email || !password) {
-        return res.status(400).json({ error: 'Email and password required' });
-    }
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
     try {
-        // Find user
         const result = await pool.query('SELECT id, password_hash FROM users WHERE email = $1', [email]);
-        if (result.rows.length === 0) {
-            return res.status(401).json({ error: 'Invalid credentials' });
-        }
+        if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
-        // Verify password
         const valid = await bcrypt.compare(password, result.rows[0].password_hash);
-        if (!valid) {
-            return res.status(401).json({ error: 'Invalid credentials' });
-        }
+        if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-        // Generate JWT
-        const token = jwt.sign(
-            { userId: result.rows[0].id, email },
-            JWT_SECRET,
-            { expiresIn: '7d' }
-        );
-
+        const token = jwt.sign({ userId: result.rows[0].id, email }, JWT_SECRET, { expiresIn: '7d' });
         res.json({ token, userId: result.rows[0].id });
     } catch (err) {
         console.error('Login error:', err);
@@ -220,23 +187,20 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// Lấy danh sách thiết bị và trạng thái hiện tại
 app.get('/devices', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM devices ORDER BY id ASC');
         console.log("📤 App vừa gọi API lấy danh sách thiết bị");
-        res.json(result.rows); // Trả về mảng dữ liệu thật từ DB
+        res.json(result.rows);
     } catch (err) {
         console.error("Lỗi lấy danh sách thiết bị", err);
         res.status(500).json({ error: "Lỗi Server" });
     }
 });
 
-// (MỚI) API Lấy lịch sử cảm biến để vẽ biểu đồ trên App
 app.get('/telemetry/:deviceId', async (req, res) => {
     try {
         const { deviceId } = req.params;
-        // Lấy 20 dòng dữ liệu gần nhất của thiết bị
         const result = await pool.query(
             'SELECT * FROM telemetry WHERE device_id = $1 ORDER BY created_at DESC LIMIT 20',
             [deviceId]
@@ -258,10 +222,10 @@ app.listen(PORT, async () => {
     // Test kết nối DB ngay khi chạy server
     try {
         const res = await pool.query('SELECT NOW()');
-        console.log('✅ Đã kết nối thành công với PostgreSQL (Render) lúc:', res.rows[0].now);
-        await initDB(); // Chạy hàm tạo bảng
-        await initUsersTable(); // Chạy hàm tạo bảng users
+        console.log('✅ Đã kết nối thành công với PostgreSQL (Supabase) lúc:', res.rows[0].now); // 👈 Đã sửa thành Supabase
+        await initDB(); 
+        await initUsersTable(); 
     } catch (err) {
-        console.error('❌ Lỗi kết nối DB Render:', err.stack);
+        console.error('❌ Lỗi kết nối DB Supabase:', err.stack); // 👈 Đã sửa thành Supabase
     }
 });
