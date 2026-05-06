@@ -1,6 +1,18 @@
 {
-    "idf.currentSetup": "/home/hoangdesamac/.espressif/v5.5.3/esp-idf",
-    "idf.port": "/dev/ttyUSB0",
-    "idf.flashType": "UART",
-    "python-envs.defaultEnvManager": "ms-python.python:system",
+  "idf.currentSetup": "/home/hoangdesamac/.espressif/v5.5.3/esp-idf",
+  "idf.port": "/dev/ttyUSB0",
+  "idf.flashType": "UART",
+  "python-envs.defaultEnvManager": "ms-python.python:system",
+  "clangd.path": "/home/hoangdesamac/.espressif/tools/esp-clang/esp-19.1.2_20250312/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/hoangdesamac/projects/DACS3/build"
+  ],
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32"
+  },
+  "idf.openOcdConfigs": [
+    "board/esp32-wrover-kit-3.3v.cfg"
+  ]
 }
