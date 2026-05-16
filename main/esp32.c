@@ -608,10 +608,12 @@ static void clothes_hanger_task(void *pvParameters)
         if (startPressed)
         {
             latched_limit_in = 1;
+            latched_limit_out = 0; // Clear opposite latch to allow movement in other direction
         }
         if (endPressed)
         {
             latched_limit_out = 1;
+            latched_limit_in = 0; // Clear opposite latch to allow movement in other direction
         }
 
         // ===== SMART Motor Direction Logic =====
