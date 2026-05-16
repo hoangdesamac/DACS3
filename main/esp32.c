@@ -1,10 +1,8 @@
 /**
  * DACS3 Main Application
- *
- * Environmental Sensor Monitoring System
- *
- * Features:
+    }
  *   - Reads multiple sensors (temperature, humidity, light, rain)
+    // ===== State Machine =====
  *   - Displays readings on SSD1306 OLED display in real-time
  *   - Sends sensor data via ESP-NOW wireless protocol
  *   - Syncs time via SNTP (NTP)
@@ -116,6 +114,10 @@ typedef enum
 } hanger_mode_t;
 static volatile hanger_mode_t current_hanger_mode = MODE_AUTO; // Mặc định chạy Tự Động
 static volatile motor_direction_t desired_motor_state = MOTOR_REVERSE;
+// Latched limit switch states: once a limit is hit, remain latched until movement
+// clears the switch (prevents accidental re-extension beyond limit)
+static volatile uint8_t latched_limit_in = 0;
+static volatile uint8_t latched_limit_out = 0;
 
 /**
  * WiFi event handler
@@ -510,8 +512,9 @@ static void display_task(void *pvParameters)
         payload.hanger_mode = (uint8_t)current_hanger_mode;
         payload.motor_state = (uint8_t)motor_get_direction();
         payload.motor_target = (uint8_t)desired_motor_state;
-        payload.limit_in = (uint8_t)motor_read_limit_switch_in();
-        payload.limit_out = (uint8_t)motor_read_limit_switch_out();
+        // Report latched limit states (1 = reached and latched, 0 = clear)
+        payload.limit_in = latched_limit_in;
+        payload.limit_out = latched_limit_out;
 
         payload.state_fan_mist = state_fan_mist ? 1 : 0;
         payload.state_light = state_light ? 1 : 0;
@@ -572,16 +575,11 @@ static void display_task(void *pvParameters)
  */
 static void clothes_hanger_task(void *pvParameters)
 {
-    const TickType_t CONTROL_PERIOD = pdMS_TO_TICKS(100); // Chu kỳ cập nhật 100ms
+    const TickType_t CONTROL_PERIOD = pdMS_TO_TICKS(10); // Chu kỳ cập nhật 10ms để phản hồi tức thì
     int log_counter = 0;
 
-    // --- CẤU HÌNH THUẬT TOÁN THÔNG MINH (HYSTERESIS + TIMER) ---
-    const float LIGHT_HIGH_THRESHOLD = 55.0f; // Sáng hơn 55% mới phơi
-    const float LIGHT_LOW_THRESHOLD = 45.0f;  // Tối hơn 45% mới cất
-    const int STABLE_TIME_CYCLES = 30;        // 30 chu kỳ * 100ms = 3 giây chống nhiễu
-
-    int bright_stable_count = 0;
-    int dark_stable_count = 0;
+    // Simple immediate-response logic: PHƠI nếu ánh sáng lớn hơn ngưỡng và không mưa
+    const float LIGHT_THRESHOLD = 50.0f;
 
     // ===== STATE =====
     motor_direction_t currentMotorState = MOTOR_STOP;
@@ -603,8 +601,18 @@ static void clothes_hanger_task(void *pvParameters)
         rain_read_raw(&rain_raw);
 
         // ===== Read Limit Switches =====
-        int startPressed = motor_read_limit_switch_in(); // LIMIT_SWITCH_START
-        int endPressed = motor_read_limit_switch_out();  // LIMIT_SWITCH_END
+        int startPressed = motor_read_limit_switch_in(); // LIMIT_SWITCH_START (retracted)
+        int endPressed = motor_read_limit_switch_out();  // LIMIT_SWITCH_END (extended)
+
+        // Latch: once a limit is reached, remember it until movement clears the switch
+        if (startPressed)
+        {
+            latched_limit_in = 1;
+        }
+        if (endPressed)
+        {
+            latched_limit_out = 1;
+        }
 
         // ===== SMART Motor Direction Logic =====
         if (current_hanger_mode != MODE_AUTO)
@@ -615,45 +623,40 @@ static void clothes_hanger_task(void *pvParameters)
         else
         {
             // ---> CHẾ ĐỘ TỰ ĐỘNG BẰNG CẢM BIẾN <---
-            if (rain_detected)
+            // Immediate decision: phơi nếu đủ sáng và không mưa, ngược lại thu
+            if (light_level > LIGHT_THRESHOLD && !rain_detected)
             {
-                // ƯU TIÊN 1: Nếu trời mưa -> THU VÀO NGAY LẬP TỨC (không chờ độ trễ), reset các bộ đếm sáng
-                desired_motor_state = MOTOR_REVERSE;
-                bright_stable_count = 0;
-                dark_stable_count = 0;
+                desired_motor_state = MOTOR_FORWARD;
             }
             else
             {
-                // ƯU TIÊN 2: Xử lý cảm biến ánh sáng bằng vùng đệm Hysteresis
-                if (light_level > LIGHT_HIGH_THRESHOLD)
-                {
-                    bright_stable_count++;
-                    dark_stable_count = 0;
-                }
-                else if (light_level < LIGHT_LOW_THRESHOLD)
-                {
-                    dark_stable_count++;
-                    bright_stable_count = 0;
-                }
-                else
-                {
-                    // Rơi vào khoảng đệm (45% -> 55%): Giữ vững quyết định cũ, chống lảo đảo (flap)
-                    bright_stable_count = 0;
-                    dark_stable_count = 0;
-                }
-
-                // Chỉ thay đổi quyết định khi môi trường sáng/tối ổn định đủ lâu (VD: 3 giây do đám mây bay ngang)
-                if (bright_stable_count >= STABLE_TIME_CYCLES)
-                {
-                    desired_motor_state = MOTOR_FORWARD;      // Phơi
-                    bright_stable_count = STABLE_TIME_CYCLES; // Chống tràn
-                }
-                else if (dark_stable_count >= STABLE_TIME_CYCLES)
-                {
-                    desired_motor_state = MOTOR_REVERSE;    // Thu
-                    dark_stable_count = STABLE_TIME_CYCLES; // Chống tràn
-                }
+                desired_motor_state = MOTOR_REVERSE;
             }
+        }
+
+        // --- Safety: require stable desired state for several cycles before moving
+        static motor_direction_t last_desired = MOTOR_STOP;
+        static int stable_count = 0;
+        const int REQUIRED_STABLE = 5; // number of CONTROL_PERIOD cycles
+
+        if (desired_motor_state == last_desired)
+        {
+            stable_count++;
+        }
+        else
+        {
+            last_desired = desired_motor_state;
+            stable_count = 0;
+        }
+
+        // Log sensor and switch state for first seconds to help debugging
+        static int boot_log_count = 0;
+        if (boot_log_count < 10)
+        {
+            ESP_LOGI(TAG, "BOOT-DBG sensors: light=%.1f rain=%d start=%d end=%d desired=%s",
+                     light_level, rain_detected, startPressed, endPressed,
+                     motor_dir_to_str(desired_motor_state));
+            boot_log_count++;
         }
 
         // ===== State Machine =====
@@ -665,9 +668,15 @@ static void clothes_hanger_task(void *pvParameters)
             // Tách riêng điều kiện cho từng chiều để tránh bị kẹt
             if (desired_motor_state == MOTOR_FORWARD)
             {
-                // Muốn đi TIẾN: Chỉ cần chưa chạm công tắc giới hạn ĐÍCH (End)
-                // Và reset cờ latch của chiều ngược lại nếu cần
-                if (!endPressed)
+                // Nếu trước đó đã latched ở START (đã chạm lúc thu), cho phép clear latch
+                if (latched_limit_in)
+                {
+                    latched_limit_in = 0; // Clear only when user/sensors request FORWARD
+                    ESP_LOGI(TAG, "Cleared latched_limit_in due to FORWARD request");
+                }
+
+                // Muốn đi TIẾN: Chỉ khi không bị latched ở END
+                if (!latched_limit_out)
                 {
                     motor_set_direction(MOTOR_FORWARD);
                     currentMotorState = MOTOR_FORWARD;
@@ -676,8 +685,15 @@ static void clothes_hanger_task(void *pvParameters)
             }
             else if (desired_motor_state == MOTOR_REVERSE)
             {
-                // Muốn đi LÙI: Chỉ cần chưa chạm công tắc giới hạn ĐẦU (Start)
-                if (!startPressed)
+                // Nếu trước đó đã latched ở END (đã chạm lúc phơi), cho phép clear latch
+                if (latched_limit_out)
+                {
+                    latched_limit_out = 0; // Clear only when user/sensors request REVERSE
+                    ESP_LOGI(TAG, "Cleared latched_limit_out due to REVERSE request");
+                }
+
+                // Muốn đi LÙI: Chỉ khi không bị latched ở START
+                if (!latched_limit_in)
                 {
                     motor_set_direction(MOTOR_REVERSE);
                     currentMotorState = MOTOR_REVERSE;
@@ -688,18 +704,18 @@ static void clothes_hanger_task(void *pvParameters)
 
         // --- 2: Motor Forward (Phơi) ---
         case MOTOR_FORWARD:
-            // Ưu tiên 1: Chạm công tắc hành trình thì dừng
+            // Ưu tiên 1: Chạm công tắc hành trình thì dừng và latch
             if (endPressed)
             {
+                latched_limit_out = 1;
                 motor_set_direction(MOTOR_STOP);
                 currentMotorState = MOTOR_STOP;
-                ESP_LOGI(TAG, "HẠN CHẾ CUỐI - Dừng motor (Đã phơi xong)");
+                ESP_LOGI(TAG, "HẠN CHẾ CUỐI - Dừng motor (Đã phơi xong) - latched_out=1");
             }
-            // Ưu tiên 2: Cảm biến thay đổi ý định (trời mưa/tối)
+            // Ưu tiên 2: Cảm biến thay đổi ý định (trời mưa/tối) -> cho phép đổi chiều
             else if (desired_motor_state == MOTOR_REVERSE)
             {
                 motor_set_direction(MOTOR_STOP);
-                vTaskDelay(pdMS_TO_TICKS(500)); // Đợi dừng hẳn
                 motor_set_direction(MOTOR_REVERSE);
                 currentMotorState = MOTOR_REVERSE;
                 ESP_LOGI(TAG, "CLOTHES HANGER - Đổi ý định: Chuyển sang KÉO VÀO (REVERSE)");
@@ -708,18 +724,18 @@ static void clothes_hanger_task(void *pvParameters)
 
         // --- 3: Motor Reverse (Thu) ---
         case MOTOR_REVERSE:
-            // Ưu tiên 1: Chạm công tắc hành trình thì dừng
+            // Ưu tiên 1: Chạm công tắc hành trình thì dừng và latch
             if (startPressed)
             {
+                latched_limit_in = 1;
                 motor_set_direction(MOTOR_STOP);
                 currentMotorState = MOTOR_STOP;
-                ESP_LOGI(TAG, "HẠN CHẾ CÓI - Dừng motor (Đã thu xong)");
+                ESP_LOGI(TAG, "HẠN CHẾ ĐẦU - Dừng motor (Đã thu xong) - latched_in=1");
             }
-            // Ưu tiên 2: Cảm biến thay đổi ý định (trời nắng lại)
+            // Ưu tiên 2: Cảm biến thay đổi ý định (trời nắng lại) -> cho phép đổi chiều
             else if (desired_motor_state == MOTOR_FORWARD)
             {
                 motor_set_direction(MOTOR_STOP);
-                vTaskDelay(pdMS_TO_TICKS(500)); // Đợi dừng hẳn
                 motor_set_direction(MOTOR_FORWARD);
                 currentMotorState = MOTOR_FORWARD;
                 ESP_LOGI(TAG, "CLOTHES HANGER - Đổi ý định: Chuyển sang PHƠI DO (FORWARD)");
@@ -732,18 +748,20 @@ static void clothes_hanger_task(void *pvParameters)
             break;
         }
 
-        // ===== HEARTBEAT LOG (Chu kỳ 2 giây = 20 * 100ms) =====
-        if (++log_counter % 20 == 0)
+        // ===== HEARTBEAT LOG (Chu kỳ 2 giây = 200 * 10ms) =====
+        if (++log_counter % 200 == 0)
         {
-            ESP_LOGI(TAG, "[MOTOR] Current: %-7s | Target: %-7s | Light: %3.0f%% | Mưa: %s | Limit[In:%d, Out:%d]",
+            ESP_LOGI(TAG, "[MOTOR] Current: %-7s | Target: %-7s | Light: %3.0f%% | Mưa: %s | Latched[In:%d, Out:%d]",
                      motor_dir_to_str(currentMotorState),
                      motor_dir_to_str(desired_motor_state),
                      light_level,
                      rain_detected ? "CÓ" : "KHÔNG",
-                     startPressed, endPressed);
+                     latched_limit_in, latched_limit_out);
         }
 
-        vTaskDelay(CONTROL_PERIOD); // Delay 100ms
+        // NOTE: Do NOT auto-clear latches on physical release anymore.
+        // Latches remain until an opposite-direction request clears them.
+        vTaskDelay(CONTROL_PERIOD); // Delay 10ms
     }
 }
 
