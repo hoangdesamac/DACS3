@@ -4,5 +4,6 @@
 void mqtt_app_start(void);
 
 void mqtt_manager_publish_sensor_data(const void *data_ptr);
+void mqtt_manager_publish_node_status(bool is_online);
 
 #endif /* MQTT_MANAGER_H */
