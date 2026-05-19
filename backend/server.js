@@ -92,6 +92,76 @@ const initUsersTable = async () => {
     } catch (err) {}
 };
 
+const initAiContextTable = async () => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS ai_context (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                session_id VARCHAR(100) NOT NULL,
+                summary VARCHAR(500),
+                messages_json TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (user_id, session_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ai_context_sessions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                session_id VARCHAR(100) NOT NULL,
+                summary VARCHAR(500),
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (user_id, session_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ai_context_messages (
+                id BIGSERIAL PRIMARY KEY,
+                session_ref_id BIGINT NOT NULL REFERENCES ai_context_sessions(id) ON DELETE CASCADE,
+                role VARCHAR(20) NOT NULL,
+                content TEXT NOT NULL,
+                message_order INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (session_ref_id, message_order)
+            );
+        `);
+
+        const legacyRows = await pool.query(`
+            SELECT user_id, session_id, summary, messages_json, updated_at
+            FROM ai_context
+        `);
+        for (const row of legacyRows.rows) {
+            const sessionResult = await pool.query(
+                `
+                INSERT INTO ai_context_sessions (user_id, session_id, summary, updated_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, session_id)
+                DO UPDATE SET summary = EXCLUDED.summary, updated_at = EXCLUDED.updated_at
+                RETURNING id
+                `,
+                [row.user_id, row.session_id, row.summary || null, row.updated_at]
+            );
+            const sessionRefId = sessionResult.rows[0].id;
+            const parsed = JSON.parse(row.messages_json || "[]");
+            await pool.query(`DELETE FROM ai_context_messages WHERE session_ref_id = $1`, [sessionRefId]);
+            for (let index = 0; index < parsed.length; index++) {
+                const message = parsed[index] || {};
+                const role = String(message.role || "").trim();
+                const content = String(message.content || "").trim();
+                if (!role || !content) continue;
+                await pool.query(
+                    `
+                    INSERT INTO ai_context_messages (session_ref_id, role, content, message_order)
+                    VALUES ($1, $2, $3, $4)
+                    `,
+                    [sessionRefId, role, content, index]
+                );
+            }
+        }
+    } catch (err) {
+        console.error("❌ Lỗi khi khởi tạo bảng ai_context:", err);
+    }
+};
+
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -231,6 +301,41 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
+app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
+    const userId = req.user?.userId;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+        return res.status(400).json({ error: 'Current password and new password are required' });
+    }
+    if (newPassword.length < 6) {
+        return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+
+    try {
+        const result = await pool.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const currentHash = result.rows[0].password_hash;
+        const isValidCurrentPassword = await bcrypt.compare(currentPassword, currentHash);
+        if (!isValidCurrentPassword) {
+            return res.status(401).json({ error: 'Current password is incorrect' });
+        }
+
+        const newPasswordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+        await pool.query(
+            'UPDATE users SET password_hash = $1 WHERE id = $2',
+            [newPasswordHash, userId],
+        );
+
+        return res.json({ message: 'Password changed successfully' });
+    } catch (err) {
+        return res.status(500).json({ error: 'Server error' });
+    }
+});
+
 app.get('/api/devices', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM devices ORDER BY id ASC');
@@ -288,6 +393,116 @@ app.post('/api/devices/toggle', async (req, res) => {
     }
 });
 
+app.post('/api/ai-context', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const { sessionId, summary, messagesJson } = req.body;
+        if (!sessionId || !messagesJson) {
+            return res.status(400).json({ error: "sessionId and messagesJson required" });
+        }
+
+        const parsed = JSON.parse(messagesJson || "[]");
+        const sessionResult = await pool.query(
+            `
+            INSERT INTO ai_context_sessions (user_id, session_id, summary, updated_at)
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id, session_id)
+            DO UPDATE SET summary = EXCLUDED.summary, updated_at = CURRENT_TIMESTAMP
+            RETURNING id
+            `,
+            [userId, sessionId, summary || null]
+        );
+        const sessionRefId = sessionResult.rows[0].id;
+
+        await pool.query(`DELETE FROM ai_context_messages WHERE session_ref_id = $1`, [sessionRefId]);
+        for (let index = 0; index < parsed.length; index++) {
+            const message = parsed[index] || {};
+            const role = String(message.role || "").trim();
+            const content = String(message.content || "").trim();
+            if (!role || !content) continue;
+            await pool.query(
+                `
+                INSERT INTO ai_context_messages (session_ref_id, role, content, message_order)
+                VALUES ($1, $2, $3, $4)
+                `,
+                [sessionRefId, role, content, index]
+            );
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error("❌ save /api/ai-context failed:", err);
+        res.status(500).json({ error: "Lỗi Server" });
+    }
+});
+
+app.get('/api/ai-context', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const result = await pool.query(
+            `
+            SELECT session_id, summary, updated_at
+            FROM ai_context_sessions
+            WHERE user_id = $1
+            ORDER BY updated_at DESC
+            `,
+            [userId]
+        );
+        res.json(result.rows.map(row => ({ ...row, messages_json: "[]" })));
+    } catch (err) {
+        res.status(500).json({ error: "Lỗi Server" });
+    }
+});
+
+app.get('/api/ai-context/:sessionId', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const { sessionId } = req.params;
+        const result = await pool.query(
+            `
+            SELECT id, session_id, summary, updated_at
+            FROM ai_context_sessions
+            WHERE user_id = $1 AND session_id = $2
+            LIMIT 1
+            `,
+            [userId, sessionId]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: "Not found" });
+        const session = result.rows[0];
+        const messages = await pool.query(
+            `
+            SELECT role, content
+            FROM ai_context_messages
+            WHERE session_ref_id = $1
+            ORDER BY message_order ASC
+            `,
+            [session.id]
+        );
+        res.json({
+            session_id: session.session_id,
+            summary: session.summary,
+            updated_at: session.updated_at,
+            messages_json: JSON.stringify(messages.rows),
+        });
+    } catch (err) {
+        res.status(500).json({ error: "Lỗi Server" });
+    }
+});
+
+app.delete('/api/ai-context/:sessionId', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const { sessionId } = req.params;
+        await pool.query(
+            `DELETE FROM ai_context_sessions WHERE user_id = $1 AND session_id = $2`,
+            [userId, sessionId]
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: "Lỗi Server" });
+    }
+});
+
 const PORT = 3000;
 app.listen(PORT, async () => {
     console.log(`\n🚀 Backend Server đang chạy tại port: ${PORT}`);
@@ -298,6 +513,7 @@ app.listen(PORT, async () => {
         console.log('✅ Đã kết nối thành công PostgreSQL lúc:', res.rows[0].now);
         await initDB();
         await initUsersTable();
+        await initAiContextTable();
     } catch (err) {
         console.error('❌ Lỗi kết nối DB:', err.stack);
     }
