@@ -249,16 +249,8 @@ void mqtt_manager_publish_sensor_data(const void *data_ptr)
     const sensor_data_t *data = (const sensor_data_t *)data_ptr;
     cJSON *root = cJSON_CreateObject();
 
-    // SỬA ID: Đích danh con Node để Backend ghi Telemetry cho đúng chuẩn
+    // Đích danh con Node để Backend ghi Telemetry
     cJSON_AddStringToObject(root, "id", "Esp32_Node_DACS3");
-
-    // Truyền trạng thái AUTO hoặc ON/OFF của Giàn phơi để App và Backend móc ra
-    if (current_dryer_auto) {
-        cJSON_AddStringToObject(root, "state", "AUTO");
-    } else {
-        cJSON_AddStringToObject(root, "state", current_dryer_on ? "ON" : "OFF");
-    }
-
     cJSON_AddNumberToObject(root, "temp", data->temperature);
     cJSON_AddNumberToObject(root, "hum", data->humidity);
     cJSON_AddNumberToObject(root, "soil", data->soil_moisture);

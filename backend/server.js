@@ -182,82 +182,94 @@ client.on('connect', () => {
     client.subscribe('DACS3/esp32_to_app');
 });
 
-// ================= LẮNG NGHE MQTT VÀ ĐỒNG BỘ CHUẨN VÀO DATABASE =================
+// ================= LẮNG NGHE MQTT VÀ ĐỒNG BỘ CHUẨN (CHỐNG SPAM DB) =================
 client.on('message', async (topic, message) => {
-    if (topic === 'DACS3/esp32_to_app') {
-        try {
-            const payload = JSON.parse(message.toString());
-            const deviceId = payload.id;
+    if (topic !== 'DACS3/esp32_to_app') return;
 
-            if (!deviceId || deviceId === 'esp32_startup') return;
+    try {
+        const payload = JSON.parse(message.toString());
+        const deviceId = payload.id;
 
-            // 1. Tính toán trạng thái thực tế từ Payload MQTT
-            let isPoweredOn = true;
-            let isAuto = false;
+        // Bỏ qua tin nhắn rác hoặc tin nhắn khởi động
+        if (!deviceId || deviceId === 'esp32_startup') return;
 
-            if (payload.isOnline !== undefined) {
-                isPoweredOn = payload.isOnline; // Bắt sự kiện Node rớt mạng từ Gateway
-            }
+        // 1. Phân tích trạng thái từ gói tin MQTT
+        let newOnline = true;
+        let newAuto = false;
 
-            if (payload.state === 'AUTO') {
-                isAuto = true;
-                isPoweredOn = true; // Auto thì thiết bị vẫn được hiểu là đang hoạt động
-            } else if (payload.state === 'ON' || payload.relay_state === 1) {
-                isAuto = false;
-                isPoweredOn = true;
-            } else if (payload.state === 'OFF' || payload.relay_state === 0) {
-                isAuto = false;
-                isPoweredOn = false; // Tắt (hoặc thu giàn phơi vào)
-            }
-
-            // 2. GHI ĐÈ TRẠNG THÁI VÀO BẢNG DEVICES ĐỂ ĐỒNG BỘ VỚI APP
-            if (deviceId === 'Esp32_Node_DACS3') {
-                // Node Trung Tâm luôn sống (trừ khi rớt mạng), không có mode AUTO
-                await pool.query(`
-                    UPDATE devices 
-                    SET is_online = $1, is_auto = false, last_updated = CURRENT_TIMESTAMP
-                    WHERE id = $2
-                `, [payload.isOnline !== false, deviceId]);
-
-                // ĐẶC BIỆT: Bản tin của Node có chứa state của Giàn phơi
-                if (payload.state !== undefined) {
-                    await pool.query(`
-                        UPDATE devices 
-                        SET is_online = $1, is_auto = $2, last_updated = CURRENT_TIMESTAMP
-                        WHERE id = 'device_dryer'
-                    `, [isPoweredOn, isAuto]);
-                    console.log(`💾 [DB Sync] Đã cập nhật Giàn phơi ('device_dryer') -> Bật/Tắt: ${isPoweredOn}, Auto: ${isAuto}`);
-                }
-            } else {
-                // Các thiết bị ngoại vi khác (Gateway, Fan, Dryer tự ACK)
-                await pool.query(`
-                    UPDATE devices 
-                    SET is_online = $1, is_auto = $2, last_updated = CURRENT_TIMESTAMP
-                    WHERE id = $3
-                `, [isPoweredOn, isAuto, deviceId]);
-                console.log(`💾 [DB Sync] Cập nhật ${deviceId} -> Bật/Tắt: ${isPoweredOn}, Auto: ${isAuto}`);
-            }
-
-            // 3. Ghi dữ liệu Telemetry (Môi trường) nếu có
-            if (payload.temp !== undefined) {
-                if (shouldPersistTelemetry(deviceId)) {
-                    await pool.query(`
-                        INSERT INTO telemetry (device_id, temperature, humidity, soil_moisture, rain_detected, relay_state)
-                        VALUES ($1, $2, $3, $4, $5, $6)
-                    `, [
-                        deviceId, 
-                        payload.temp, 
-                        payload.hum, 
-                        payload.soil || 0, 
-                        payload.rain !== undefined ? payload.rain : 0, 
-                        isPoweredOn ? 1 : 0
-                    ]);
-                    console.log(`📊 TELEMETRY: Đã lưu dữ liệu môi trường từ [${deviceId}]`);
-                }
-            }
-        } catch (error) {
-            console.error("❌ Lỗi xử lý dữ liệu MQTT:", error);
+        if (payload.isOnline !== undefined) {
+            newOnline = payload.isOnline;
         }
+
+        if (payload.state === 'AUTO') {
+            newAuto = true;
+            newOnline = true;
+        } else if (payload.state === 'ON' || payload.relay_state === 1) {
+            newAuto = false;
+            newOnline = true;
+        } else if (payload.state === 'OFF' || payload.relay_state === 0) {
+            newAuto = false;
+            newOnline = false;
+        }
+
+        // 2. HÀM CẬP NHẬT THÔNG MINH: Chỉ Update nếu thực sự có thay đổi
+        const syncDevice = async (targetId, isOnline, isAuto) => {
+            try {
+                // Lấy trạng thái hiện tại trong DB
+                const current = await pool.query(
+                    'SELECT is_online, is_auto FROM devices WHERE id = $1',
+                    [targetId]
+                );
+
+                if (current.rows.length > 0) {
+                    const old = current.rows[0];
+                    // CHỈ UPDATE KHI CÓ SỰ THAY ĐỔI
+                    if (old.is_online !== isOnline || old.is_auto !== isAuto) {
+                        await pool.query(
+                            `UPDATE devices SET is_online = $1, is_auto = $2, last_updated = CURRENT_TIMESTAMP WHERE id = $3`,
+                            [isOnline, isAuto, targetId]
+                        );
+                        console.log(`💾 [DB Sync] Đã cập nhật ${targetId} -> Online: ${isOnline}, Auto: ${isAuto}`);
+                    }
+                }
+            } catch (err) {
+                console.error(`❌ Lỗi đồng bộ thiết bị ${targetId}:`, err);
+            }
+        };
+
+        // 3. Phân luồng xử lý theo ID
+        if (deviceId === 'Esp32_Node_DACS3') {
+            // Cập nhật trạng thái cho chính con Node Trung Tâm
+            await syncDevice(deviceId, payload.isOnline !== false, false);
+
+            // Xử lý riêng cho Giàn phơi (Dryer) được kẹp trong gói tin của Node
+            if (payload.state !== undefined) {
+                await syncDevice('device_dryer', newOnline, newAuto);
+            }
+        } else {
+            // Xử lý cho các thiết bị khác (Fan, Gateway...)
+            await syncDevice(deviceId, newOnline, newAuto);
+        }
+
+        // 4. Ghi dữ liệu Telemetry (Môi trường) - Giữ nguyên cơ chế 5 phút/lần của bạn
+        if (payload.temp !== undefined && shouldPersistTelemetry(deviceId)) {
+            await pool.query(
+                `INSERT INTO telemetry (device_id, temperature, humidity, soil_moisture, rain_detected, relay_state)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [
+                    deviceId, 
+                    payload.temp, 
+                    payload.hum, 
+                    payload.soil || 0, 
+                    payload.rain !== undefined ? payload.rain : 0, 
+                    newOnline ? 1 : 0
+                ]
+            );
+            console.log(`📊 TELEMETRY: Đã lưu dữ liệu môi trường từ [${deviceId}]`);
+        }
+
+    } catch (error) {
+        console.error("❌ Lỗi xử lý dữ liệu MQTT:", error);
     }
 });
 
