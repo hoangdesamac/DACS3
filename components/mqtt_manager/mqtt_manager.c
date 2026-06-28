@@ -15,54 +15,92 @@
 #include "freertos/task.h"
 
 static const char *TAG = "MQTT_MANAGER";
-#define GPIO_PIN_RELAY 2
+
+// ========== CẤU HÌNH PIN TẠI GATEWAY ==========
+#define GPIO_PIN_RELAY 2   // Relay phụ (Thiết bị 001)
+#define GPIO_PIN_LED   4   // ĐÈN LED CHÍNH (Điều khiển trực tiếp)
 
 esp_mqtt_client_handle_t global_mqtt_client = NULL;
 bool is_mqtt_connected = false;
 
-// Thêm biến để lưu trạng thái của Quạt (vì nó điều khiển qua ESP-NOW, mạch Gateway không đọc chân GPIO được)
+// Biến lưu trạng thái để đồng bộ với App
 static bool current_fan_state = false;
-static bool current_dryer_on = false;   // true = Phơi (ON), false = Thu (OFF)
-static bool current_dryer_auto = false; // true = Đang chế độ Tự động
+static bool current_led_state = false;  
+static bool current_dryer_on = false;   
+static bool current_dryer_auto = false; 
 
-static void mqtt_publish_ack_custom(
-    esp_mqtt_client_handle_t client,
-    const char *device_id,
-    const char *state)
+// ================= HÀM KHỞI TẠO PHẦN CỨNG TẠI CHỖ =================
+static void gateway_hardware_init(void)
 {
-    if (client == NULL) return;
-    char response_msg[256];
-    snprintf(response_msg, sizeof(response_msg),
-             "{\"id\": \"%s\", \"isOnline\": true, \"state\": \"%s\"}",
-             device_id, state);
-    esp_mqtt_client_publish(client, "DACS3/esp32_to_app", response_msg, 0, 1, 0);
-    ESP_LOGI(TAG, "Sent ACK to App: ID=%s, State=%s", device_id, state);
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << GPIO_PIN_RELAY) | (1ULL << GPIO_PIN_LED),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    // Đảm bảo lúc mới bật nguồn đèn và relay đều TẮT (Mức 0 cho Active High)
+    gpio_set_level(GPIO_PIN_RELAY, 0);
+    gpio_set_level(GPIO_PIN_LED, 0);
+    
+    ESP_LOGI(TAG, "Hardware Init: GPIO 2 (Relay) và GPIO 4 (LED) đã sẵn sàng.");
 }
 
-static void mqtt_publish_ack(
-    esp_mqtt_client_handle_t client,
-    const char *device_id,
-    bool is_on)
+// ================= HÀM GỬI MQTT AN TOÀN (CÓ KIỂM TRA TRẠNG THÁI) =================
+static void safe_mqtt_publish(const char *topic, const char *data)
 {
-    char response_msg[256];
-    snprintf(response_msg, sizeof(response_msg),
-             "{\"id\": \"%s\", \"isOnline\": true, \"state\": \"%s\"}",
-             device_id, is_on ? "ON" : "OFF");
-    esp_mqtt_client_publish(client, "DACS3/esp32_to_app", response_msg, 0, 1, 0);
+    if (global_mqtt_client == NULL) {
+        ESP_LOGE(TAG, "LỖI: Client MQTT chưa được khởi tạo!");
+        return;
+    }
+
+    if (!is_mqtt_connected) {
+        ESP_LOGW(TAG, "MQTT ĐANG NGOẠI TUYẾN: Bản tin bị hủy hoặc đang chờ kết nối lại...");
+        return;
+    }
+
+    // Gửi với QoS 1 để đảm bảo tin nhắn đến được Broker
+    int msg_id = esp_mqtt_client_publish(global_mqtt_client, topic, data, 0, 1, 0);
+    
+    if (msg_id != -1) {
+        ESP_LOGI(TAG, "Đã đẩy bản tin vào hàng đợi thành công (ID: %d)", msg_id);
+    } else {
+        ESP_LOGE(TAG, "LỖI: Không thể gửi bản tin lên Broker!");
+    }
 }
 
-// ================= THÊM MỚI: HÀM BÁO TRẠNG THÁI NODE =================
+// ================= HÀM PHẢN HỒI MQTT CHO APP =================
+static void mqtt_publish_ack_custom(const char *device_id, const char *state)
+{
+    char response_msg[256];
+    
+    // So sánh chuỗi: Nếu state là "ON" thì gán is_on = true, ngược lại là false
+    bool is_on = (strcmp(state, "ON") == 0);
+
+    // Gắn trạng thái is_on vào thẳng chữ isOnline để App Android không bị nhầm lẫn nữa
+    snprintf(response_msg, sizeof(response_msg),
+             "{\"id\": \"%s\", \"isOnline\": %s, \"state\": \"%s\"}",
+             device_id, is_on ? "true" : "false", state);
+             
+    safe_mqtt_publish("DACS3/esp32_to_app", response_msg);
+    ESP_LOGI(TAG, "Sent ACK -> App: %s is %s", device_id, state);
+}
+
+static void mqtt_publish_ack(const char *device_id, bool is_on)
+{
+    mqtt_publish_ack_custom(device_id, is_on ? "ON" : "OFF");
+}
+
 void mqtt_manager_publish_node_status(bool is_online)
 {
-    if (!is_mqtt_connected || global_mqtt_client == NULL) return;
     char msg[128];
-    // Đẩy trạng thái OFFLINE/ONLINE đích danh cho Node
     snprintf(msg, sizeof(msg), "{\"id\": \"Esp32_Node_DACS3\", \"isOnline\": %s}", is_online ? "true" : "false");
-    esp_mqtt_client_publish(global_mqtt_client, "DACS3/esp32_to_app", msg, 0, 1, 0);
-    ESP_LOGD(TAG, "Đã đẩy trạng thái Node: %s", is_online ? "ONLINE" : "OFFLINE");
+    safe_mqtt_publish("DACS3/esp32_to_app", msg);
 }
-// ======================================================================
 
+// ================= XỬ LÝ SỰ KIỆN MQTT =================
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     esp_mqtt_event_handle_t event = event_data;
@@ -72,144 +110,110 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     {
     case MQTT_EVENT_CONNECTED:
         is_mqtt_connected = true;
-        ESP_LOGI(TAG, "=> ĐÃ KẾT NỐI THÀNH CÔNG VỚI EMQX BROKER!");
+        ESP_LOGI(TAG, "=> ĐÃ KẾT NỐI BROKER EMQX ✅");
         esp_mqtt_client_subscribe(client, "DACS3/app_to_esp32", 0);
-        ESP_LOGI(TAG, "Đã đăng ký hóng tin nhắn ở Topic: DACS3/app_to_esp32");
-
-        char *msg = "{\"id\": \"esp32_startup\", \"isOnline\": true}";
-        esp_mqtt_client_publish(client, "DACS3/esp32_to_app", msg, 0, 1, 0);
+        
+        // Báo trạng thái Gateway Online
+        safe_mqtt_publish("DACS3/esp32_to_app", "{\"id\": \"esp32_startup\", \"isOnline\": true}");
         break;
 
     case MQTT_EVENT_DISCONNECTED:
         is_mqtt_connected = false;
-        ESP_LOGW(TAG, "Đã mất kết nối với Broker, đang tự động thử lại...");
+        ESP_LOGW(TAG, "=> MẤT KẾT NỐI BROKER ❌ (Đang tự động thử kết nối lại...)");
+        break;
+
+    case MQTT_EVENT_PUBLISHED:
+        ESP_LOGD(TAG, "Broker đã xác nhận nhận được tin nhắn ID: %d", event->msg_id);
         break;
 
     case MQTT_EVENT_DATA:
-        ESP_LOGI(TAG, "=== CÓ TIN NHẮN MỚI TỪ APP ===");
-        if (strncmp(event->topic, "DACS3/app_to_esp32", event->topic_len) == 0)
+    {
+        if (strncmp(event->topic, "DACS3/app_to_esp32", event->topic_len) != 0) break;
+
+        char payload[256] = {0};
+        snprintf(payload, sizeof(payload), "%.*s", event->data_len, event->data);
+        ESP_LOGI(TAG, "Payload: %s", payload);
+
+        cJSON *json = cJSON_Parse(payload);
+        if (!json) break;
+
+        cJSON *id_item = cJSON_GetObjectItem(json, "id");
+        cJSON *cmd_item = cJSON_GetObjectItem(json, "command");
+
+        if (cJSON_IsString(id_item) && cJSON_IsString(cmd_item))
         {
-            char payload[256] = {0};
-            int len = event->data_len < (sizeof(payload) - 1) ? event->data_len : (sizeof(payload) - 1);
-            snprintf(payload, len + 1, "%.*s", len, event->data);
+            const char *device_id = id_item->valuestring;
+            const char *command = cmd_item->valuestring;
 
-            ESP_LOGI(TAG, "Nội dung nhận được: %s", payload);
-
-            cJSON *json = cJSON_Parse(payload);
-            if (json != NULL)
+            // --- LỆNH ON / OFF ---
+            if (strcmp(command, "ON") == 0 || strcmp(command, "OFF") == 0)
             {
-                cJSON *id_item = cJSON_GetObjectItem(json, "id");
-                cJSON *cmd_item = cJSON_GetObjectItem(json, "command");
+                const bool is_on = (strcmp(command, "ON") == 0);
 
-                if (cJSON_IsString(id_item) && cJSON_IsString(cmd_item))
+                // 1. ĐÈN LED (Điều khiển trực tiếp tại Gateway - GPIO 4)
+                if (strcmp(device_id, "device_led") == 0)
                 {
-                    const char *device_id = id_item->valuestring;
-                    const char *command = cmd_item->valuestring;
-
-                    // 1. NẾU LÀ LỆNH ĐIỀU KHIỂN (ON / OFF)
-                    if (strcmp(command, "ON") == 0 || strcmp(command, "OFF") == 0)
-                    {
-                        const bool is_on = (strcmp(command, "ON") == 0);
-
-                        // Xử lý Giàn phơi (device_dryer)
-                        if (strcmp(device_id, "device_dryer") == 0)
-                        {
-                            current_dryer_on = is_on;
-                            current_dryer_auto = false; // Người dùng bấm nút -> Thoát chế độ Tự động
-                            
-                            const char *espnow_cmd = is_on ? "CMD:FORWARD" : "CMD:REVERSE";
-                            ESP_LOGW(TAG, ">>> GIÀN PHƠI: Chuyển Manual -> %s <<<", is_on ? "PHƠI" : "THU");
-                            
-                            espnow_send_text_to_node(espnow_cmd);
-                            mqtt_publish_ack_custom(client, device_id, is_on ? "ON" : "OFF");
-                        }
-                        // Xử lý Quạt (device_fan)
-                        else if (strcmp(device_id, "device_fan") == 0)
-                        {
-                            current_fan_state = is_on;
-                            const char *espnow_cmd = is_on ? "CMD:FAN_ON" : "CMD:FAN_OFF";
-                            ESP_LOGW(TAG, ">>> QUẠT NODE: %s <<<", espnow_cmd);
-
-                            espnow_send_text_to_node(espnow_cmd);
-                            mqtt_publish_ack(client, "device_fan", is_on);
-                        }
-                        // Xử lý Relay tại chỗ (device_001)
-                        else if (strcmp(device_id, "device_001") == 0)
-                        {
-                            ESP_LOGW(TAG, ">>> RELAY GATEWAY (GPIO%d) -> %s <<<", GPIO_PIN_RELAY, command);
-                            gpio_set_level(GPIO_PIN_RELAY, is_on ? 1 : 0);
-                            vTaskDelay(pdMS_TO_TICKS(50));
-                            mqtt_publish_ack(client, device_id, is_on);
-                        }
-                        else {
-                            ESP_LOGW(TAG, "Device ID không hỗ trợ điều khiển ON/OFF: %s", device_id);
-                        }
-                    }
-                    // 2. NẾU LÀ LỆNH AUTO
-                    else if (strcmp(command, "AUTO") == 0)
-                    {
-                        if (strcmp(device_id, "device_dryer") == 0)
-                        {
-                            current_dryer_auto = true;
-                            ESP_LOGW(TAG, ">>> GIÀN PHƠI: Kích hoạt chế độ TỰ ĐỘNG (AUTO) <<<");
-                            
-                            espnow_send_text_to_node("CMD:AUTO");
-                            mqtt_publish_ack_custom(client, device_id, "AUTO");
-                        }
-                        else {
-                            ESP_LOGW(TAG, "Thiết bị này không hỗ trợ chế độ AUTO: %s", device_id);
-                        }
-                    }
-                    // 3. NẾU LÀ LỆNH PING TỪ APP (Để đồng bộ và giữ kết nối)
-                    else if (strcmp(command, "PING") == 0) 
-                    {
-                        ESP_LOGD(TAG, "Heartbeat PING received for: %s", device_id);
-                        
-                        if (strcmp(device_id, "device_dryer") == 0) {
-                            if (current_dryer_auto) {
-                                mqtt_publish_ack_custom(client, device_id, "AUTO");
-                            } else {
-                                mqtt_publish_ack(client, device_id, current_dryer_on);
-                            }
-                        } 
-                        else if (strcmp(device_id, "device_fan") == 0) {
-                            mqtt_publish_ack(client, "device_fan", current_fan_state);
-                        } 
-                        else if (strcmp(device_id, "device_001") == 0) {
-                            bool relay_is_on = gpio_get_level(GPIO_PIN_RELAY) == 1;
-                            mqtt_publish_ack(client, "device_001", relay_is_on);
-                        } 
-                        // ĐÃ CHỈNH SỬA THEO ĐỀ XUẤT CỦA BẠN: Gọi hàm request_data_from_node() thay vì gửi "PING_NODE"
-                        else if (strcmp(device_id, "Esp32_Node_DACS3") == 0) {
-                            ESP_LOGI(TAG, "App PING Node Cảm biến -> Gửi lệnh GET_DATA để kiểm tra!");
-                            request_data_from_node(); 
-                        }
-                        else if (strcmp(device_id, "esp32_startup") == 0) {
-                            mqtt_publish_ack(client, "esp32_startup", true);
-                        } 
-                        else {
-                            mqtt_publish_ack_custom(client, device_id, "OFF"); 
-                        }
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "Không nhận diện được lệnh: %s", command);
-                    }
+                    current_led_state = is_on;
+                    gpio_set_level(GPIO_PIN_LED, is_on ? 1 : 0); // Active High
+                    ESP_LOGW(TAG, "LOCAL CONTROL: LED (GPIO4) -> %s", is_on ? "ON" : "OFF");
+                    mqtt_publish_ack("device_led", is_on);
                 }
-                cJSON_Delete(json);
+                // 2. GIÀN PHƠI (Điều khiển từ xa qua Node - ESP-NOW)
+                else if (strcmp(device_id, "device_dryer") == 0)
+                {
+                    current_dryer_on = is_on;
+                    current_dryer_auto = false;
+                    espnow_send_text_to_node(is_on ? "CMD:FORWARD" : "CMD:REVERSE");
+                    mqtt_publish_ack(device_id, is_on);
+                }
+                // 3. QUẠT (Điều khiển từ xa qua Node - ESP-NOW)
+                else if (strcmp(device_id, "device_fan") == 0)
+                {
+                    current_fan_state = is_on;
+                    espnow_send_text_to_node(is_on ? "CMD:FAN_ON" : "CMD:FAN_OFF");
+                    mqtt_publish_ack("device_fan", is_on);
+                }
+                // 4. RELAY PHỤ TẠI CHỖ (GPIO 2)
+                else if (strcmp(device_id, "device_001") == 0)
+                {
+                    gpio_set_level(GPIO_PIN_RELAY, is_on ? 1 : 0);
+                    mqtt_publish_ack(device_id, is_on);
+                }
             }
-            else
+            // --- LỆNH AUTO ---
+            else if (strcmp(command, "AUTO") == 0)
             {
-                ESP_LOGE(TAG, "Lỗi phân giải JSON payload!");
+                if (strcmp(device_id, "device_dryer") == 0)
+                {
+                    current_dryer_auto = true;
+                    espnow_send_text_to_node("CMD:AUTO");
+                    mqtt_publish_ack_custom(device_id, "AUTO");
+                }
+            }
+            // --- LỆNH PING (ĐỒNG BỘ TRẠNG THÁI) ---
+            else if (strcmp(command, "PING") == 0) 
+            {
+                if (strcmp(device_id, "device_led") == 0) {
+                    mqtt_publish_ack("device_led", current_led_state);
+                } 
+                else if (strcmp(device_id, "device_dryer") == 0) {
+                    if (current_dryer_auto) mqtt_publish_ack_custom(device_id, "AUTO");
+                    else mqtt_publish_ack(device_id, current_dryer_on);
+                } 
+                else if (strcmp(device_id, "device_fan") == 0) {
+                    mqtt_publish_ack("device_fan", current_fan_state);
+                }
+                else if (strcmp(device_id, "Esp32_Node_DACS3") == 0) {
+                    request_data_from_node(); 
+                }
+                else {
+                    mqtt_publish_ack_custom(device_id, "OFF");
+                }
             }
         }
-        ESP_LOGI(TAG, "=======================");
+        cJSON_Delete(json);
         break;
-
-    case MQTT_EVENT_ERROR:
-        ESP_LOGE(TAG, "MQTT Event Error detected!");
-        break;
-
+    }
     default:
         break;
     }
@@ -217,14 +221,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 void mqtt_app_start(void)
 {
-    ESP_LOGI(TAG, "Khởi động MQTT Client...");
+    // Khởi tạo phần cứng trước khi chạy MQTT
+    gateway_hardware_init();
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.hostname = "broker.emqx.io",
         .broker.address.port = 1883,
         .broker.address.transport = MQTT_TRANSPORT_OVER_TCP,
-        .credentials.client_id = "Gateway_DACS3_S3_VietNam_9999",
-        .network.timeout_ms = 10000,
+        .credentials.client_id = "Gateway_DACS3_VietNam_New",
     };
 
     global_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -234,22 +238,11 @@ void mqtt_app_start(void)
 
 void mqtt_manager_publish_sensor_data(const void *data_ptr)
 {
-    if (global_mqtt_client == NULL || data_ptr == NULL)
-    {
-        ESP_LOGW(TAG, "MQTT chưa sẵn sàng hoặc dữ liệu rỗng!");
-        return;
-    }
-
-    if (!is_mqtt_connected)
-    {
-        ESP_LOGW(TAG, "Đang rớt mạng MQTT, tạm bỏ qua gói tin này để tránh dội bom (spam)!");
-        return;
-    }
+    // Loại bỏ check is_mqtt_connected tại đây vì safe_mqtt_publish đã lo liệu
+    if (data_ptr == NULL) return;
 
     const sensor_data_t *data = (const sensor_data_t *)data_ptr;
     cJSON *root = cJSON_CreateObject();
-
-    // Đích danh con Node để Backend ghi Telemetry
     cJSON_AddStringToObject(root, "id", "Esp32_Node_DACS3");
     cJSON_AddNumberToObject(root, "temp", data->temperature);
     cJSON_AddNumberToObject(root, "hum", data->humidity);
@@ -258,11 +251,8 @@ void mqtt_manager_publish_sensor_data(const void *data_ptr)
     cJSON_AddNumberToObject(root, "rain", data->rain_detected);
 
     char *json_string = cJSON_PrintUnformatted(root);
-
-    if (json_string != NULL)
-    {
-        ESP_LOGI(TAG, "🚀 Chuẩn bị bắn lên EMQX: %s", json_string);
-        esp_mqtt_client_publish(global_mqtt_client, "DACS3/esp32_to_app", json_string, 0, 1, 0);
+    if (json_string) {
+        safe_mqtt_publish("DACS3/esp32_to_app", json_string);
         cJSON_free(json_string);
     }
     cJSON_Delete(root);

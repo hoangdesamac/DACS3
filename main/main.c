@@ -1,6 +1,3 @@
-#include "esp_rom_gpio.h"
-#include "soc/gpio_struct.h"
-#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -12,35 +9,33 @@
 #include "espnow_manager.h"
 
 static const char *TAG = "MAIN_APP";
-#define GPIO_PIN_RELAY 2
 
 void app_main(void) {
-    ESP_LOGI(TAG, "Hệ thống đang khởi động...");
+    ESP_LOGI(TAG, "=========================================");
+    ESP_LOGI(TAG, "HỆ THỐNG GATEWAY ESP32 ĐANG KHỞI ĐỘNG...");
+    ESP_LOGI(TAG, "=========================================");
 
-    // 1. FIX LỖI GPIO: Đổi thành INPUT_OUTPUT để đọc lại được trạng thái
-    gpio_reset_pin(GPIO_PIN_RELAY);
-    gpio_set_direction(GPIO_PIN_RELAY, GPIO_MODE_INPUT_OUTPUT); // <--- QUAN TRỌNG
-    gpio_set_level(GPIO_PIN_RELAY, 0);
-
-    // 2. Khởi tạo WiFi
+    // 1. Khởi tạo WiFi
     wifi_init_sta();
     
-    // 3. FIX LỖI CHỜ LÂU: Giảm từ 10s xuống 2.5s vì WiFi kết nối rất nhanh
+    // 2. Chờ cấp IP (Giữ nguyên 2.5s theo ý bạn)
     vTaskDelay(2500 / portTICK_PERIOD_MS); 
     
-    // In địa chỉ MAC
+    // 3. In địa chỉ MAC để khai báo cho mạch Node
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "ĐỊA CHỈ MAC S3: %02X:%02X:%02X:%02X:%02X:%02X", 
+    ESP_LOGI(TAG, "ĐỊA CHỈ MAC CỦA GATEWAY: %02X:%02X:%02X:%02X:%02X:%02X", 
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_LOGI(TAG, "=========================================");
     
-    // Khởi tạo ESP-NOW và MQTT
-    init_s3_espnow();
+    // 4. Khởi tạo ESP-NOW
+    init_s3_espnow(); 
+    
+    // 5. Khởi tạo MQTT (Hàm này giờ sẽ tự động gọi gateway_hardware_init() để setup GPIO 2 và GPIO 4)
     mqtt_app_start();
     
-    // Vòng lặp chính
+    // 6. Vòng lặp chính: Định kỳ yêu cầu mạch Node gửi dữ liệu cảm biến
     while (1) {
         request_data_from_node();
         vTaskDelay(5000 / portTICK_PERIOD_MS); 
